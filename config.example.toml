@@ -14,7 +14,7 @@ scrape_interval_secs = 30
 # Upstream Prometheus-compatible metric sources
 
 [[sources]]
-url = "http://ceph-exporter:9283/metrics"
+url = "http://localhost:9100/metrics"
 timeout_secs = 25
 
 # [[sources]]

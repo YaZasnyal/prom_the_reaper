@@ -119,7 +119,6 @@ async fn shard_returns_plain_text_by_default() {
         ct.contains("text/plain"),
         "expected text/plain content-type, got: {ct}"
     );
-    // No content-encoding header for plain response
     assert!(
         resp.headers().get(header::CONTENT_ENCODING).is_none(),
         "expected no content-encoding for plain response"
@@ -142,7 +141,6 @@ async fn shard_returns_gzip_when_requested() {
         .unwrap_or("");
     assert_eq!(ce, "gzip", "expected gzip content-encoding");
 
-    // Decompress and verify it's valid prometheus text
     let compressed = resp.as_bytes().to_vec();
     let mut decoder = GzDecoder::new(&compressed[..]);
     let mut decompressed = String::new();
@@ -199,7 +197,6 @@ async fn all_metrics_present_across_shards() {
         combined.push_str(&resp.text());
     }
 
-    // Every metric family from the source should appear somewhere across all shards
     assert!(combined.contains("go_goroutines"), "missing go_goroutines");
     assert!(
         combined.contains("http_requests_total"),
@@ -217,40 +214,7 @@ async fn all_metrics_present_across_shards() {
 }
 
 #[tokio::test]
-async fn each_metric_family_in_exactly_one_shard() {
-    let state = populated_state(SAMPLE_METRICS, NUM_SHARDS);
-    let server = test_server(state, NUM_SHARDS);
-
-    let metric_names = [
-        "go_goroutines",
-        "http_requests_total",
-        "request_duration_seconds",
-        "memory_bytes",
-        "cpu_seconds_total",
-    ];
-
-    // Collect shard texts
-    let mut shard_texts: Vec<String> = Vec::new();
-    for shard_id in 0..NUM_SHARDS {
-        let resp = server.get(&format!("/metrics/shard/{shard_id}")).await;
-        shard_texts.push(resp.text());
-    }
-
-    for name in metric_names {
-        let count = shard_texts
-            .iter()
-            .filter(|text| text.contains(name))
-            .count();
-        assert_eq!(
-            count, 1,
-            "metric family '{name}' should appear in exactly 1 shard, found in {count}"
-        );
-    }
-}
-
-#[tokio::test]
 async fn shard_assignment_is_deterministic() {
-    // Build state twice from the same input and verify identical shard assignment
     let s1 = populated_state(SAMPLE_METRICS, NUM_SHARDS);
     let s2 = populated_state(SAMPLE_METRICS, NUM_SHARDS);
     let server1 = test_server(s1, NUM_SHARDS);
@@ -265,6 +229,113 @@ async fn shard_assignment_is_deterministic() {
             "shard {shard_id} content differs between two identical builds"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Per-series sharding with high-cardinality families
+// ---------------------------------------------------------------------------
+
+/// Verifies that series from the same metric family can be distributed
+/// across multiple shards (high-cardinality case), and that each shard
+/// that receives any series also gets the HELP/TYPE header.
+#[tokio::test]
+async fn high_cardinality_series_spread_across_shards() {
+    // Build a metric with enough series that they spread across 4 shards.
+    let mut input = String::from(
+        "# HELP rpc_duration_seconds RPC call duration.\n\
+         # TYPE rpc_duration_seconds histogram\n",
+    );
+    for i in 0..40 {
+        let labels = format!(r#"rpc_duration_seconds_bucket{{shard="{i}",le="0.1"}} {i}"#);
+        input.push_str(&labels);
+        input.push('\n');
+        let labels = format!(r#"rpc_duration_seconds_sum{{shard="{i}"}} {i}.5"#);
+        input.push_str(&labels);
+        input.push('\n');
+        let labels = format!(r#"rpc_duration_seconds_count{{shard="{i}"}} {i}"#);
+        input.push_str(&labels);
+        input.push('\n');
+    }
+
+    let state = populated_state(&input, NUM_SHARDS);
+    let server = test_server(state, NUM_SHARDS);
+
+    let mut shards_with_family = 0u32;
+    let mut total_series = 0usize;
+
+    for shard_id in 0..NUM_SHARDS {
+        let text = server
+            .get(&format!("/metrics/shard/{shard_id}"))
+            .await
+            .text();
+        if text.contains("rpc_duration_seconds") {
+            shards_with_family += 1;
+            // Every shard that has series must also have the HELP and TYPE header.
+            assert!(
+                text.contains("# HELP rpc_duration_seconds"),
+                "shard {shard_id} has series but missing HELP header"
+            );
+            assert!(
+                text.contains("# TYPE rpc_duration_seconds histogram"),
+                "shard {shard_id} has series but missing TYPE header"
+            );
+            // Count _count lines as a proxy for number of series in this shard.
+            total_series += text.lines().filter(|l| l.contains("_count{")).count();
+        }
+    }
+
+    // With 40 series and 4 shards we expect distribution across multiple shards.
+    assert!(
+        shards_with_family > 1,
+        "expected series spread across multiple shards, all ended up in {shards_with_family}"
+    );
+    // All 40 _count series must be accounted for across all shards.
+    assert_eq!(
+        total_series, 40,
+        "expected 40 _count series total across all shards"
+    );
+}
+
+/// Verifies that no series are lost or duplicated when sharding high-cardinality data.
+#[tokio::test]
+async fn no_series_lost_or_duplicated_across_shards() {
+    let mut input = String::new();
+    let n = 100u32;
+    for i in 0..n {
+        input.push_str(&format!("some_counter{{id=\"{i}\"}} {i}\n"));
+    }
+
+    let state = populated_state(&input, NUM_SHARDS);
+    let server = test_server(state, NUM_SHARDS);
+
+    let mut seen_ids = std::collections::HashSet::new();
+    for shard_id in 0..NUM_SHARDS {
+        let text = server
+            .get(&format!("/metrics/shard/{shard_id}"))
+            .await
+            .text();
+        for line in text.lines() {
+            if line.starts_with("some_counter{") {
+                // Extract id value
+                if let Some(start) = line.find("id=\"") {
+                    let rest = &line[start + 4..];
+                    if let Some(end) = rest.find('"') {
+                        let id: u32 = rest[..end].parse().expect("id should be a number");
+                        assert!(
+                            seen_ids.insert(id),
+                            "series id={id} appeared in more than one shard"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        seen_ids.len(),
+        n as usize,
+        "expected {n} unique series, got {}",
+        seen_ids.len()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -296,19 +367,12 @@ async fn status_returns_valid_json() {
 
     let body: serde_json::Value = serde_json::from_str(&resp.text()).expect("invalid JSON");
     assert_eq!(body["num_shards"], NUM_SHARDS);
-    assert!(
-        body["last_scrape_ago_secs"].is_number(),
-        "last_scrape_ago_secs should be a number"
-    );
-    assert!(
-        body["shard_sizes_bytes"].is_array(),
-        "shard_sizes_bytes should be an array"
-    );
+    assert!(body["last_scrape_ago_secs"].is_number());
     assert_eq!(
         body["shard_sizes_bytes"].as_array().unwrap().len(),
         NUM_SHARDS as usize
     );
-    assert!(body["sources"].is_array(), "sources should be an array");
+    assert!(body["sources"].is_array());
     assert!(body["sources"][0]["success"].as_bool().unwrap_or(false));
 }
 
@@ -316,8 +380,6 @@ async fn status_returns_valid_json() {
 // Mock upstream + full scrape integration
 // ---------------------------------------------------------------------------
 
-/// Spins up a real HTTP server serving static Prometheus metrics,
-/// runs one scrape cycle against it, and verifies the resulting shards.
 #[tokio::test]
 async fn full_scrape_cycle_with_mock_upstream() {
     use crate::config::{AppConfig, SourceConfig};
@@ -325,14 +387,12 @@ async fn full_scrape_cycle_with_mock_upstream() {
     use std::collections::HashMap;
     use tokio::net::TcpListener;
 
-    // Bind to a random port for the mock upstream
     let upstream_listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("failed to bind upstream listener");
     let upstream_addr = upstream_listener.local_addr().unwrap();
     let upstream_url = format!("http://{}/metrics", upstream_addr);
 
-    // Start mock upstream server
     let mock_app = Router::new().route("/metrics", get(|| async { SAMPLE_METRICS }));
     tokio::spawn(async move {
         axum::serve(upstream_listener, mock_app)
@@ -340,7 +400,6 @@ async fn full_scrape_cycle_with_mock_upstream() {
             .expect("mock upstream failed");
     });
 
-    // Give the mock server a moment to start
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let config = Arc::new(AppConfig {
@@ -355,42 +414,36 @@ async fn full_scrape_cycle_with_mock_upstream() {
     });
 
     let shared_state = empty_shared_state();
-
-    // Spawn the scraper and wait for it to complete one cycle
     tokio::spawn(run_scrape_loop(config, shared_state.clone()));
 
-    // Wait for the first scrape to complete (up to 3 seconds)
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {
         if tokio::time::Instant::now() >= deadline {
             panic!("timed out waiting for first scrape");
         }
-        let guard = shared_state.load();
-        if !guard.shards.is_empty() {
+        if !shared_state.load().shards.is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    // Verify shards via HTTP
     let server = test_server(shared_state, NUM_SHARDS);
-
-    // Health should now be OK
     server.get("/health").await.assert_status_ok();
 
-    // All metrics should be present across shards
     let mut combined = String::new();
     for shard_id in 0..NUM_SHARDS {
-        let resp = server.get(&format!("/metrics/shard/{shard_id}")).await;
-        resp.assert_status_ok();
-        combined.push_str(&resp.text());
+        combined.push_str(
+            &server
+                .get(&format!("/metrics/shard/{shard_id}"))
+                .await
+                .text(),
+        );
     }
     assert!(combined.contains("go_goroutines"));
     assert!(combined.contains("http_requests_total"));
     assert!(combined.contains("request_duration_seconds_bucket"));
     assert!(combined.contains("cpu_seconds_total"));
 
-    // Status should report success
     let status: serde_json::Value =
         serde_json::from_str(&server.get("/status").await.text()).unwrap();
     assert!(status["sources"][0]["success"].as_bool().unwrap_or(false));
@@ -403,23 +456,30 @@ async fn full_scrape_cycle_with_mock_upstream() {
 #[tokio::test]
 async fn consistent_hashing_minimal_movement() {
     let families = parse_families(SAMPLE_METRICS);
-    let names: Vec<String> = families.iter().map(|f| f.name.clone()).collect();
+
+    // Collect all (name, label_key) hash keys — same as what build_shards uses.
+    let keys: Vec<String> = families
+        .iter()
+        .flat_map(|f| {
+            f.samples
+                .iter()
+                .map(|s| format!("{}\x00{}", f.name, s.label_key))
+        })
+        .collect();
 
     let old_shards = NUM_SHARDS;
     let new_shards = NUM_SHARDS + 1;
 
-    let moved = names
+    let moved = keys
         .iter()
-        .filter(|name| assign_shard(name, old_shards) != assign_shard(name, new_shards))
+        .filter(|k| assign_shard(k, old_shards) != assign_shard(k, new_shards))
         .count();
 
-    let ratio = moved as f64 / names.len() as f64;
-    // Jump consistent hash guarantees ~1/new_shards movement (here ~20%)
-    // We allow up to 35% as tolerance
+    let ratio = moved as f64 / keys.len() as f64;
     assert!(
         ratio < 0.35,
-        "too many metrics moved between shards: {moved}/{} ({:.0}%)",
-        names.len(),
+        "too many series moved between shards: {moved}/{} ({:.0}%)",
+        keys.len(),
         ratio * 100.0
     );
 }
@@ -432,11 +492,7 @@ async fn consistent_hashing_minimal_movement() {
 async fn single_shard_contains_all_metrics() {
     let state = populated_state(SAMPLE_METRICS, 1);
     let server = test_server(state, 1);
-
-    let resp = server.get("/metrics/shard/0").await;
-    resp.assert_status_ok();
-    let text = resp.text();
-
+    let text = server.get("/metrics/shard/0").await.text();
     assert!(text.contains("go_goroutines"));
     assert!(text.contains("http_requests_total"));
     assert!(text.contains("memory_bytes"));

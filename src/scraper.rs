@@ -78,7 +78,7 @@ pub async fn run_scrape_loop(config: Arc<AppConfig>, state: SharedState) {
 
 type ScrapeResult = (
     String,
-    Result<(Vec<crate::parser::MetricFamily>, Duration), (String, Duration)>,
+    Result<(Vec<crate::parser::ParsedFamily>, Duration), (String, Duration)>,
 );
 
 async fn scrape_all(client: &Client, sources: &[SourceConfig]) -> Vec<ScrapeResult> {
