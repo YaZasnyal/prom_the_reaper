@@ -22,6 +22,10 @@ pub struct ShardedState {
 pub struct ShardData {
     pub text: String,
     pub gzip: Bytes,
+    /// Number of unique metric families in this shard.
+    pub families_count: usize,
+    /// Number of individual time series (samples) in this shard.
+    pub series_count: usize,
 }
 
 pub struct SourceStatus {
@@ -38,6 +42,7 @@ pub struct SourceStatus {
 /// the first time any series of that family appears there.
 pub fn build_shards(families: Vec<ParsedFamily>, num_shards: u32) -> Vec<ShardData> {
     let mut shard_texts: Vec<String> = (0..num_shards).map(|_| String::new()).collect();
+    let mut shard_series: Vec<usize> = vec![0; num_shards as usize];
     // Tracks which (shard_idx, family_name) pairs have had their header written.
     let mut headers_written: HashSet<(usize, String)> = HashSet::new();
 
@@ -59,16 +64,24 @@ pub fn build_shards(families: Vec<ParsedFamily>, num_shards: u32) -> Vec<ShardDa
             }
 
             shard_texts[shard_id].push_str(&sample.raw_line);
+            shard_series[shard_id] += 1;
         }
     }
 
     shard_texts
         .into_iter()
-        .map(|text| {
+        .enumerate()
+        .map(|(i, text)| {
+            let families_count = headers_written
+                .iter()
+                .filter(|(shard_id, _)| *shard_id == i)
+                .count();
             let gzip = gzip_compress(text.as_bytes());
             ShardData {
                 text,
                 gzip: Bytes::from(gzip),
+                families_count,
+                series_count: shard_series[i],
             }
         })
         .collect()

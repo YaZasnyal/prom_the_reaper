@@ -368,10 +368,14 @@ async fn status_returns_valid_json() {
     let body: serde_json::Value = serde_json::from_str(&resp.text()).expect("invalid JSON");
     assert_eq!(body["num_shards"], NUM_SHARDS);
     assert!(body["last_scrape_ago_secs"].is_number());
-    assert_eq!(
-        body["shard_sizes_bytes"].as_array().unwrap().len(),
-        NUM_SHARDS as usize
-    );
+    let shards = body["shards"].as_array().unwrap();
+    assert_eq!(shards.len(), NUM_SHARDS as usize);
+    // Each shard entry must have size_bytes, families and series fields.
+    for shard in shards {
+        assert!(shard["size_bytes"].is_number(), "missing size_bytes");
+        assert!(shard["families"].is_number(), "missing families");
+        assert!(shard["series"].is_number(), "missing series");
+    }
     assert!(body["sources"].is_array());
     assert!(body["sources"][0]["success"].as_bool().unwrap_or(false));
 }
