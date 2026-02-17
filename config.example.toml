@@ -1,0 +1,23 @@
+# prom_the_reaper configuration
+
+# Address to listen on
+listen = "0.0.0.0:9095"
+
+# Number of shards to split metrics into.
+# Uses consistent hashing (xxh3 + jump hash), so changing this
+# moves only ~1/N of metrics to different shards.
+num_shards = 4
+
+# How often to scrape upstream sources (seconds)
+scrape_interval_secs = 30
+
+# Upstream Prometheus-compatible metric sources
+
+[[sources]]
+url = "http://ceph-exporter:9283/metrics"
+timeout_secs = 25
+
+# [[sources]]
+# url = "http://node-exporter:9100/metrics"
+# timeout_secs = 10
+# headers = { "Authorization" = "Bearer token123" }
