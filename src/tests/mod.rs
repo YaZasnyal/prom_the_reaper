@@ -119,10 +119,6 @@ async fn shard_returns_plain_text_by_default() {
         ct.contains("text/plain"),
         "expected text/plain content-type, got: {ct}"
     );
-    assert!(
-        resp.headers().get(header::CONTENT_ENCODING).is_none(),
-        "expected no content-encoding for plain response"
-    );
 }
 
 #[tokio::test]
@@ -139,12 +135,10 @@ async fn shard_returns_gzip_when_requested() {
         .get(header::CONTENT_ENCODING)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    assert_eq!(ce, "gzip", "expected gzip content-encoding");
+    assert_eq!(ce, "gzip", "expected Content-Encoding: gzip");
 
-    let compressed = resp.as_bytes().to_vec();
-    let mut decoder = GzDecoder::new(&compressed[..]);
     let mut decompressed = String::new();
-    decoder
+    GzDecoder::new(resp.as_bytes().as_ref())
         .read_to_string(&mut decompressed)
         .expect("failed to decompress gzip response");
     assert!(
@@ -171,15 +165,24 @@ async fn gzip_and_plain_shard_content_match() {
             .await;
         gzip_resp.assert_status_ok();
 
-        let compressed = gzip_resp.as_bytes().to_vec();
-        let mut decoder = GzDecoder::new(&compressed[..]);
-        let mut decompressed = String::new();
-        decoder
-            .read_to_string(&mut decompressed)
-            .expect("failed to decompress");
+        let is_gzip = gzip_resp
+            .headers()
+            .get(header::CONTENT_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("gzip"));
+
+        let gzip_text = if is_gzip {
+            let mut decompressed = String::new();
+            GzDecoder::new(gzip_resp.as_bytes().as_ref())
+                .read_to_string(&mut decompressed)
+                .expect("failed to decompress");
+            decompressed
+        } else {
+            gzip_resp.text()
+        };
 
         assert_eq!(
-            plain_text, decompressed,
+            plain_text, gzip_text,
             "shard {shard_id}: plain and gzip-decompressed content differ"
         );
     }

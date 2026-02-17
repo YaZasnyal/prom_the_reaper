@@ -1,9 +1,10 @@
 use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use serde_json::json;
+use tower_http::compression::CompressionLayer;
 
 use crate::state::SharedState;
 
@@ -11,7 +12,7 @@ pub fn router(state: SharedState, num_shards: u32) -> Router {
     Router::new()
         .route(
             "/metrics/shard/{id}",
-            get(move |state, path, headers| shard_handler(state, path, headers, num_shards)),
+            get(move |state, path| shard_handler(state, path, num_shards)),
         )
         .route("/health", get(health_handler))
         .route(
@@ -22,13 +23,13 @@ pub fn router(state: SharedState, num_shards: u32) -> Router {
             "/metrics",
             get(move |state| self_metrics_handler(state, num_shards)),
         )
+        .layer(CompressionLayer::new())
         .with_state(state)
 }
 
 async fn shard_handler(
     State(state): State<SharedState>,
     Path(id): Path<u32>,
-    headers: HeaderMap,
     num_shards: u32,
 ) -> Response {
     if id >= num_shards {
@@ -44,37 +45,15 @@ async fn shard_handler(
         return (StatusCode::SERVICE_UNAVAILABLE, "metrics not yet available").into_response();
     }
 
-    let shard = &guard.shards[id as usize];
-
-    let accepts_gzip = headers
-        .get(header::ACCEPT_ENCODING)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.contains("gzip"));
-
-    if accepts_gzip {
-        (
-            StatusCode::OK,
-            [
-                (
-                    header::CONTENT_TYPE,
-                    "text/plain; version=0.0.4; charset=utf-8",
-                ),
-                (header::CONTENT_ENCODING, "gzip"),
-            ],
-            shard.gzip.clone(),
-        )
-            .into_response()
-    } else {
-        (
-            StatusCode::OK,
-            [(
-                header::CONTENT_TYPE,
-                "text/plain; version=0.0.4; charset=utf-8",
-            )],
-            shard.text.clone(),
-        )
-            .into_response()
-    }
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        guard.shards[id as usize].text.clone(),
+    )
+        .into_response()
 }
 
 async fn health_handler(State(state): State<SharedState>) -> Response {

@@ -1,12 +1,8 @@
 use std::collections::HashSet;
-use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
-use bytes::Bytes;
-use flate2::Compression;
-use flate2::write::GzEncoder;
 
 use crate::hasher::assign_shard;
 use crate::parser::ParsedFamily;
@@ -21,7 +17,6 @@ pub struct ShardedState {
 
 pub struct ShardData {
     pub text: String,
-    pub gzip: Bytes,
     /// Number of unique metric families in this shard.
     pub families_count: usize,
     /// Number of individual time series (samples) in this shard.
@@ -76,21 +71,13 @@ pub fn build_shards(families: Vec<ParsedFamily>, num_shards: u32) -> Vec<ShardDa
                 .iter()
                 .filter(|(shard_id, _)| *shard_id == i)
                 .count();
-            let gzip = gzip_compress(text.as_bytes());
             ShardData {
                 text,
-                gzip: Bytes::from(gzip),
                 families_count,
                 series_count: shard_series[i],
             }
         })
         .collect()
-}
-
-fn gzip_compress(data: &[u8]) -> Vec<u8> {
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
-    encoder.write_all(data).expect("gzip write failed");
-    encoder.finish().expect("gzip finish failed")
 }
 
 pub fn empty_state() -> Arc<ShardedState> {
