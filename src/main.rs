@@ -4,6 +4,8 @@ mod parser;
 mod scraper;
 mod server;
 mod state;
+#[cfg(test)]
+mod tests;
 
 use std::path::PathBuf;
 use std::sync::Arc;
