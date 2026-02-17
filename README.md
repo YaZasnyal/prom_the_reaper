@@ -17,11 +17,12 @@ Point a separate Prometheus at each shard.
   `metric_name + sorted labels`, so high-cardinality families spread evenly across shards
 - **Consistent hashing** (xxh3 + jump hash) — when you change the shard count, only
   ~1/N of series move; the rest stay on the same shard
-- **Multiple sources** — scrape several upstream exporters, all metrics are merged and
-  sharded together
-- **Zero-allocation serving** — shard responses (plain text and gzip) are pre-built in
-  the background and served via atomic pointer swap (ArcSwap)
-- **Gzip** — returns pre-compressed responses to clients that send `Accept-Encoding: gzip`
+- **Multiple sources** — scrape several upstream exporters in parallel; all metrics are
+  merged and sharded together
+- **Zero-allocation serving** — shard responses are pre-built in the background and
+  served via atomic pointer swap (ArcSwap); no locks on the hot path
+- **Gzip** — all endpoints support `Accept-Encoding: gzip` via middleware
+- **Self-monitoring** — `GET /metrics` exposes proxy health in Prometheus format
 - **Stale data on failure** — if all upstreams are unavailable, the last successful
   scrape is served rather than an empty response
 
@@ -71,11 +72,44 @@ RUST_LOG=debug ./target/release/prom_the_reaper config.toml   # verbose
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /metrics/shard/{id}` | Prometheus exposition text for shard `id` (0-indexed). Supports `Accept-Encoding: gzip`. |
+| `GET /metrics/shard/{id}` | Prometheus exposition text for shard `id` (0-indexed). |
+| `GET /metrics` | Proxy's own health metrics in Prometheus exposition format. |
 | `GET /health` | `200 OK` once the first scrape completes, `503` before that. |
-| `GET /status` | JSON: last scrape time, per-source status, shard sizes. |
+| `GET /status` | JSON diagnostics: last scrape time, per-source status, per-shard stats. |
 
-Returns `503` on `/metrics/shard/{id}` before the first successful scrape cycle completes.
+All endpoints support `Accept-Encoding: gzip`. Returns `503` before the first successful
+scrape cycle completes.
+
+### /status response
+
+```json
+{
+  "num_shards": 4,
+  "last_scrape_ago_secs": 8.1,
+  "sources": [
+    {"url": "http://...", "success": true, "duration_ms": 342, "metric_families": 1500}
+  ],
+  "shards": [
+    {"id": 0, "size_bytes": 145000, "families": 380, "series": 12400},
+    {"id": 1, "size_bytes": 148000, "families": 375, "series": 12600},
+    ...
+  ]
+}
+```
+
+### /metrics (self-monitoring)
+
+```
+prom_reaper_last_scrape_age_seconds 8.1
+prom_reaper_shard_series{shard="0"} 12400
+prom_reaper_shard_families{shard="0"} 380
+prom_reaper_shard_size_bytes{shard="0"} 145000
+prom_reaper_source_up{url="http://..."} 1
+prom_reaper_source_scrape_duration_seconds{url="http://..."} 0.342
+prom_reaper_num_shards 4
+```
+
+Add it as a regular scrape target to alert on scrape failures or shard imbalance.
 
 ## Prometheus configuration
 
@@ -94,6 +128,11 @@ scrape_configs:
     metrics_path: /metrics/shard/1
 
   # ... repeat for each shard
+
+  - job_name: prom_reaper
+    static_configs:
+      - targets: ['prom-reaper:9090']
+    metrics_path: /metrics
 ```
 
 ## Changing the shard count
@@ -119,9 +158,10 @@ python3 contrib/mock_exporter.py
   > /tmp/test.toml
 ./target/release/prom_the_reaper /tmp/test.toml
 
-# Check shards
+# Explore
 curl http://127.0.0.1:9090/metrics/shard/0
 curl http://127.0.0.1:9090/metrics/shard/1
+curl http://127.0.0.1:9090/metrics
 curl http://127.0.0.1:9090/status | python3 -m json.tool
 curl -H 'Accept-Encoding: gzip' http://127.0.0.1:9090/metrics/shard/0 | gunzip | head
 ```
@@ -132,6 +172,6 @@ curl -H 'Accept-Encoding: gzip' http://127.0.0.1:9090/metrics/shard/0 | gunzip |
 cargo test
 ```
 
-29 tests: unit tests for parser, hasher, and integration tests covering HTTP endpoints,
+29 tests: unit tests for parser and hasher, integration tests covering HTTP endpoints,
 gzip, high-cardinality sharding, no lost/duplicated series, and a full end-to-end scrape
 cycle against a real mock upstream.
