@@ -1,4 +1,5 @@
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -45,15 +46,15 @@ async fn shard_handler(
         return (StatusCode::SERVICE_UNAVAILABLE, "metrics not yet available").into_response();
     }
 
-    (
-        StatusCode::OK,
-        [(
+    let text = guard.shards[id as usize].text.clone(); // O(1) ref-count bump
+    axum::http::Response::builder()
+        .status(StatusCode::OK)
+        .header(
             header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
-        )],
-        guard.shards[id as usize].text.clone(),
-    )
-        .into_response()
+        )
+        .body(Body::from(text))
+        .unwrap()
 }
 
 async fn health_handler(State(state): State<SharedState>) -> Response {

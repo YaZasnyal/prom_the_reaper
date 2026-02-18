@@ -1,9 +1,21 @@
-use xxhash_rust::xxh3::xxh3_64;
+use xxhash_rust::xxh3::{Xxh3, xxh3_64};
 
-/// Assigns a metric name to a shard using xxh3 + jump consistent hash.
+/// Assigns a metric series to a shard using xxh3 + jump consistent hash.
+/// The key is `metric_name` for label-less metrics.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn assign_shard(metric_name: &str, num_shards: u32) -> u32 {
     let hash = xxh3_64(metric_name.as_bytes());
     jump_consistent_hash(hash, num_shards)
+}
+
+/// Assigns a metric series to a shard by hashing `name\x00label_key` without
+/// allocating an intermediate String.
+pub fn assign_shard_from_parts(name: &str, label_key: &str, num_shards: u32) -> u32 {
+    let mut h = Xxh3::new();
+    h.update(name.as_bytes());
+    h.update(b"\x00");
+    h.update(label_key.as_bytes());
+    jump_consistent_hash(h.digest(), num_shards)
 }
 
 /// Jump consistent hash algorithm (Lamping & Veach, 2014).

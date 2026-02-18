@@ -2,9 +2,6 @@ use std::collections::{HashMap, HashSet};
 
 /// A single parsed sample line, preserving the original text.
 pub struct Sample {
-    /// Sorted, canonical label string used as the hash key (e.g. `cpu="0",mode="idle"`).
-    /// Empty string for metrics without labels.
-    pub label_key: String,
     /// The original verbatim line (including trailing newline).
     pub raw_line: String,
 }
@@ -74,9 +71,7 @@ pub fn parse_families(input: &str) -> Vec<ParsedFamily> {
                 idx
             };
 
-            let label_key = extract_sorted_label_key(line);
             families[idx].samples.push(Sample {
-                label_key,
                 raw_line: format!("{line}\n"),
             });
         }
@@ -113,17 +108,18 @@ pub fn merge_families(families: Vec<ParsedFamily>) -> (Vec<ParsedFamily>, MergeS
             let existing_keys: HashSet<String> = merged[idx]
                 .samples
                 .iter()
-                .map(|s| s.label_key.clone())
+                .map(|s| extract_sorted_label_key(&s.raw_line))
                 .collect();
 
             for sample in family.samples {
-                if existing_keys.contains(&sample.label_key) {
+                let label_key = extract_sorted_label_key(&sample.raw_line);
+                if existing_keys.contains(&label_key) {
                     duplicate_count += 1;
                     if examples.len() < 3 {
-                        let example = if sample.label_key.is_empty() {
+                        let example = if label_key.is_empty() {
                             family.name.clone()
                         } else {
-                            format!("{}{{{}}}", family.name, sample.label_key)
+                            format!("{}{{{}}}", family.name, label_key)
                         };
                         examples.push(example);
                     }
@@ -167,7 +163,7 @@ fn first_token(s: &str) -> &str {
 }
 
 /// Extracts the metric name from a sample line (everything before `{` or first space).
-fn extract_metric_name(line: &str) -> &str {
+pub(crate) fn extract_metric_name(line: &str) -> &str {
     let end = line.find(['{', ' ']).unwrap_or(line.len());
     &line[..end]
 }
@@ -202,7 +198,7 @@ fn sample_belongs_to(sample_name: &str, base_name: &str) -> bool {
 ///
 /// For `http_requests_total{method="GET",code="200"} 1` returns `code="200",method="GET"`.
 /// For `up 1` (no labels) returns `""`.
-fn extract_sorted_label_key(line: &str) -> String {
+pub(crate) fn extract_sorted_label_key(line: &str) -> String {
     let open = match line.find('{') {
         Some(i) => i,
         None => return String::new(),
@@ -251,14 +247,20 @@ mod tests {
         assert!(families[0].help_line.is_some());
         assert!(families[0].type_line.is_some());
         assert_eq!(families[0].samples.len(), 1);
-        assert_eq!(families[0].samples[0].label_key, "");
+        assert_eq!(
+            extract_sorted_label_key(&families[0].samples[0].raw_line),
+            ""
+        );
     }
 
     #[test]
     fn label_key_is_sorted() {
         let input = "# TYPE req counter\nreq{z=\"1\",a=\"2\",m=\"3\"} 1\n";
         let families = parse_families(input);
-        assert_eq!(families[0].samples[0].label_key, r#"a="2",m="3",z="1""#);
+        assert_eq!(
+            extract_sorted_label_key(&families[0].samples[0].raw_line),
+            r#"a="2",m="3",z="1""#
+        );
     }
 
     #[test]
@@ -316,7 +318,7 @@ http_req_duration_seconds_count 200
         let input = "req{path=\"/a,b\",method=\"GET\"} 1\n";
         let families = parse_families(input);
         assert_eq!(
-            families[0].samples[0].label_key,
+            extract_sorted_label_key(&families[0].samples[0].raw_line),
             r#"method="GET",path="/a,b""#
         );
     }
@@ -374,7 +376,7 @@ http_req_duration_seconds_count 200
         let kept = merged[0]
             .samples
             .iter()
-            .find(|s| s.label_key == r#"cpu="1""#)
+            .find(|s| extract_sorted_label_key(&s.raw_line) == r#"cpu="1""#)
             .expect("cpu=1 sample must exist");
         assert!(
             kept.raw_line.contains("20"),
