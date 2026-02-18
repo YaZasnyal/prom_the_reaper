@@ -168,9 +168,7 @@ fn first_token(s: &str) -> &str {
 
 /// Extracts the metric name from a sample line (everything before `{` or first space).
 fn extract_metric_name(line: &str) -> &str {
-    let end = line
-        .find(['{', ' '])
-        .unwrap_or(line.len());
+    let end = line.find(['{', ' ']).unwrap_or(line.len());
     &line[..end]
 }
 
