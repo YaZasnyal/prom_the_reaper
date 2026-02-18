@@ -9,10 +9,11 @@ use axum::routing::get;
 use axum_test::TestServer;
 use flate2::read::GzDecoder;
 
-use crate::hasher::assign_shard;
 use crate::parser::{extract_sorted_label_key, parse_families};
 use crate::server::router;
 use crate::state::{ShardedState, SharedState, SourceStatus, build_shards, empty_state};
+
+use crate::hasher::assign_shard;
 
 // ---------------------------------------------------------------------------
 // Helpers

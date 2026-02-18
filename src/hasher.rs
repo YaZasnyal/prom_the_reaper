@@ -1,12 +1,4 @@
-use xxhash_rust::xxh3::{Xxh3, xxh3_64};
-
-/// Assigns a metric series to a shard using xxh3 + jump consistent hash.
-/// The key is `metric_name` for label-less metrics.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn assign_shard(metric_name: &str, num_shards: u32) -> u32 {
-    let hash = xxh3_64(metric_name.as_bytes());
-    jump_consistent_hash(hash, num_shards)
-}
+use xxhash_rust::xxh3::Xxh3;
 
 /// Assigns a metric series to a shard by hashing `name\x00label_key` without
 /// allocating an intermediate String.
@@ -30,6 +22,14 @@ fn jump_consistent_hash(mut key: u64, num_buckets: u32) -> u32 {
             as i64;
     }
     b as u32
+}
+
+/// Only compiled in test builds; used by unit tests in this module and integration tests.
+#[cfg(test)]
+pub(crate) fn assign_shard(metric_name: &str, num_shards: u32) -> u32 {
+    use xxhash_rust::xxh3::xxh3_64;
+    let hash = xxh3_64(metric_name.as_bytes());
+    jump_consistent_hash(hash, num_shards)
 }
 
 #[cfg(test)]
