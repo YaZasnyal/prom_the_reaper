@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-musl:
+    name: Build (x86_64-unknown-linux-musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain with musl target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get install -y musl-tools
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-musl-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-musl-
+
+      - name: Build release binary (musl)
+        run: cargo build --locked --release --target x86_64-unknown-linux-musl
+
+      - name: Verify static binary (no glibc)
+        run: |
+          ldd target/x86_64-unknown-linux-musl/release/prom_the_reaper 2>&1 | grep -q "not a dynamic executable" \
+            || { echo "ERROR: binary links against system libraries" >&2; ldd target/x86_64-unknown-linux-musl/release/prom_the_reaper >&2; exit 1; }
+
+      - name: Rename binary for release
+        run: |
+          cp target/x86_64-unknown-linux-musl/release/prom_the_reaper \
+             prom_the_reaper-${{ github.ref_name }}-x86_64-unknown-linux-musl
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prom_the_reaper-x86_64-unknown-linux-musl
+          path: prom_the_reaper-${{ github.ref_name }}-x86_64-unknown-linux-musl
+
+  release:
+    name: Create GitHub Release
+    needs: build-musl
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: prom_the_reaper-x86_64-unknown-linux-musl
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: prom_the_reaper-${{ github.ref_name }}-x86_64-unknown-linux-musl
+          generate_release_notes: true
