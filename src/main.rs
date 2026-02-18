@@ -47,9 +47,9 @@ async fn main() -> anyhow::Result<()> {
     // mimalloc reads env vars before this point; we only set it when the env var
     // was not provided.
     if std::env::var_os("MIMALLOC_PURGE_DELAY").is_none() {
-        // mi_option_purge_delay = 17 (index in the options array / enum value).
+        // mi_option_purge_delay = 15 (index in the options array / enum value).
         // SAFETY: mi_option_set is thread-safe per mimalloc docs.
-        unsafe { libmimalloc_sys::mi_option_set(17, 0) };
+        unsafe { libmimalloc_sys::mi_option_set(15, 0) };
     }
 
     let cli = Cli::parse();
