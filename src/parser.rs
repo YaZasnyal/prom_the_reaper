@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 /// A single parsed sample line, preserving the original text.
 pub struct Sample {
     /// Sorted, canonical label string used as the hash key (e.g. `cpu="0",mode="idle"`).
@@ -83,6 +85,60 @@ pub fn parse_families(input: &str) -> Vec<ParsedFamily> {
     // Drop families with no samples (e.g. orphaned HELP/TYPE lines).
     families.retain(|f| !f.samples.is_empty());
     families
+}
+
+/// Statistics returned by [`merge_families`].
+pub struct MergeStats {
+    /// Total number of sample lines dropped because their `(family, label_key)` was already seen.
+    pub duplicate_count: usize,
+    /// Up to three human-readable examples of dropped series (for warn logging).
+    pub examples: Vec<String>,
+}
+
+/// Merges `Vec<ParsedFamily>` collected from multiple sources into a deduplicated list.
+///
+/// When the same `(family_name, label_key)` appears more than once the **first** occurrence
+/// is kept and all subsequent ones are silently dropped (first-wins).  Families with the
+/// same name but distinct label sets are merged into one `ParsedFamily` entry, preserving
+/// their HELP/TYPE from the first source that declared them.
+pub fn merge_families(families: Vec<ParsedFamily>) -> (Vec<ParsedFamily>, MergeStats) {
+    let mut merged: Vec<ParsedFamily> = Vec::new();
+    let mut name_to_idx: HashMap<String, usize> = HashMap::new();
+    let mut duplicate_count = 0usize;
+    let mut examples: Vec<String> = Vec::new();
+
+    for family in families {
+        if let Some(&idx) = name_to_idx.get(&family.name) {
+            // Family already present — merge samples, first-wins on label_key collisions.
+            let existing_keys: HashSet<String> = merged[idx]
+                .samples
+                .iter()
+                .map(|s| s.label_key.clone())
+                .collect();
+
+            for sample in family.samples {
+                if existing_keys.contains(&sample.label_key) {
+                    duplicate_count += 1;
+                    if examples.len() < 3 {
+                        let example = if sample.label_key.is_empty() {
+                            family.name.clone()
+                        } else {
+                            format!("{}{{{}}}", family.name, sample.label_key)
+                        };
+                        examples.push(example);
+                    }
+                } else {
+                    merged[idx].samples.push(sample);
+                }
+            }
+        } else {
+            let idx = merged.len();
+            name_to_idx.insert(family.name.clone(), idx);
+            merged.push(family);
+        }
+    }
+
+    (merged, MergeStats { duplicate_count, examples })
 }
 
 /// Returns the index of the family with the given name, inserting a new one if needed.
@@ -259,5 +315,79 @@ http_req_duration_seconds_count 200
             families[0].samples[0].label_key,
             r#"method="GET",path="/a,b""#
         );
+    }
+
+    // ------------------------------------------------------------------
+    // merge_families tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn merge_families_no_overlap_is_passthrough() {
+        let input = "# TYPE aaa gauge\naaa 1\n# TYPE bbb gauge\nbbb 2\n";
+        let families = parse_families(input);
+        let (merged, stats) = merge_families(families);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(stats.duplicate_count, 0);
+        assert!(stats.examples.is_empty());
+    }
+
+    #[test]
+    fn merge_families_identical_label_key_first_wins() {
+        // Two sources expose the same label-less metric.
+        let mut families = parse_families("# TYPE up gauge\nup 1\n");
+        families.extend(parse_families("# TYPE up gauge\nup 0\n"));
+        let (merged, stats) = merge_families(families);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].samples.len(), 1, "duplicate must be dropped");
+        // First value (1) must be kept.
+        assert!(merged[0].samples[0].raw_line.contains("up 1"));
+        assert_eq!(stats.duplicate_count, 1);
+        assert_eq!(stats.examples, vec!["up"]);
+    }
+
+    #[test]
+    fn merge_families_distinct_label_sets_both_kept() {
+        // Same family name, different labels — no collision.
+        let mut families = parse_families("cpu{cpu=\"0\"} 100\n");
+        families.extend(parse_families("cpu{cpu=\"1\"} 200\n"));
+        let (merged, stats) = merge_families(families);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].samples.len(), 2);
+        assert_eq!(stats.duplicate_count, 0);
+    }
+
+    #[test]
+    fn merge_families_partial_overlap() {
+        // Source 1: cpu{cpu="0"} and cpu{cpu="1"}
+        // Source 2: cpu{cpu="1"} (duplicate) and cpu{cpu="2"} (new)
+        let mut families = parse_families("cpu{cpu=\"0\"} 10\ncpu{cpu=\"1\"} 20\n");
+        families.extend(parse_families("cpu{cpu=\"1\"} 99\ncpu{cpu=\"2\"} 30\n"));
+        let (merged, stats) = merge_families(families);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].samples.len(), 3, "0, 1 and 2 should be present");
+        assert_eq!(stats.duplicate_count, 1);
+        // The kept value for cpu="1" must be 20 (first-wins), not 99.
+        let kept = merged[0]
+            .samples
+            .iter()
+            .find(|s| s.label_key == r#"cpu="1""#)
+            .expect("cpu=1 sample must exist");
+        assert!(kept.raw_line.contains("20"), "first-seen value must be kept");
+    }
+
+    #[test]
+    fn merge_families_examples_capped_at_three() {
+        // Four duplicate series — examples list must not exceed 3.
+        let mut f1_input = String::new();
+        let mut f2_input = String::new();
+        for i in 0..4 {
+            f1_input.push_str(&format!("m{{id=\"{i}\"}} 1\n"));
+            f2_input.push_str(&format!("m{{id=\"{i}\"}} 2\n"));
+        }
+        let mut families = parse_families(&f1_input);
+        families.extend(parse_families(&f2_input));
+        let (_, stats) = merge_families(families);
+        assert_eq!(stats.duplicate_count, 4);
+        assert_eq!(stats.examples.len(), 3, "examples must be capped at 3");
     }
 }

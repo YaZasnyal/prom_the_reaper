@@ -7,7 +7,7 @@ use tokio::time;
 use tracing::{error, info, warn};
 
 use crate::config::{AppConfig, SourceConfig};
-use crate::parser::parse_families;
+use crate::parser::{merge_families, parse_families};
 use crate::state::{ShardedState, SharedState, SourceStatus, build_shards};
 
 pub async fn run_scrape_loop(config: Arc<AppConfig>, state: SharedState) {
@@ -59,6 +59,14 @@ pub async fn run_scrape_loop(config: Arc<AppConfig>, state: SharedState) {
         }
 
         if any_success {
+            let (all_families, merge_stats) = merge_families(all_families);
+            if merge_stats.duplicate_count > 0 {
+                warn!(
+                    duplicate_count = merge_stats.duplicate_count,
+                    examples = %merge_stats.examples.join(", "),
+                    "duplicate series detected across sources, first-seen value kept"
+                );
+            }
             let shards = build_shards(all_families, config.num_shards);
             let new_state = Arc::new(ShardedState {
                 shards,
