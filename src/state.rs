@@ -3,9 +3,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
+use bytes::Bytes;
 
-use crate::hasher::assign_shard;
-use crate::parser::ParsedFamily;
+use crate::hasher::assign_shard_from_parts;
+use crate::parser::{ParsedFamily, extract_metric_name, extract_sorted_label_key};
 
 pub type SharedState = Arc<ArcSwap<ShardedState>>;
 
@@ -16,7 +17,7 @@ pub struct ShardedState {
 }
 
 pub struct ShardData {
-    pub text: String,
+    pub text: Bytes,
     /// Number of unique metric families in this shard.
     pub families_count: usize,
     /// Number of individual time series (samples) in this shard.
@@ -39,23 +40,26 @@ pub fn build_shards(families: Vec<ParsedFamily>, num_shards: u32) -> Vec<ShardDa
     let mut shard_texts: Vec<String> = (0..num_shards).map(|_| String::new()).collect();
     let mut shard_series: Vec<usize> = vec![0; num_shards as usize];
     // Tracks which (shard_idx, family_name) pairs have had their header written.
-    let mut headers_written: HashSet<(usize, String)> = HashSet::new();
+    // Uses &str borrowing from `families` to avoid cloning family names.
+    let mut headers_written: HashSet<(usize, &str)> = HashSet::new();
 
     for family in &families {
         for sample in &family.samples {
-            let hash_key = format!("{}\x00{}", family.name, sample.label_key);
-            let shard_id = assign_shard(&hash_key, num_shards) as usize;
+            // Compute hash key inline from raw_line to avoid storing label_key in Sample.
+            let sample_name = extract_metric_name(&sample.raw_line);
+            let label_key = extract_sorted_label_key(&sample.raw_line);
+            // Build hash key without a heap allocation: hash name + NUL + labels directly.
+            let shard_id = assign_shard_from_parts(sample_name, &label_key, num_shards) as usize;
 
             // Emit HELP/TYPE the first time this family appears in this shard.
-            let header_key = (shard_id, family.name.clone());
-            if !headers_written.contains(&header_key) {
+            if !headers_written.contains(&(shard_id, family.name.as_str())) {
                 if let Some(help) = &family.help_line {
                     shard_texts[shard_id].push_str(help);
                 }
                 if let Some(type_line) = &family.type_line {
                     shard_texts[shard_id].push_str(type_line);
                 }
-                headers_written.insert(header_key);
+                headers_written.insert((shard_id, family.name.as_str()));
             }
 
             shard_texts[shard_id].push_str(&sample.raw_line);
@@ -72,7 +76,7 @@ pub fn build_shards(families: Vec<ParsedFamily>, num_shards: u32) -> Vec<ShardDa
                 .filter(|(shard_id, _)| *shard_id == i)
                 .count();
             ShardData {
-                text,
+                text: Bytes::from(text),
                 families_count,
                 series_count: shard_series[i],
             }

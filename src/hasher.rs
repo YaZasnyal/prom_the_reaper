@@ -1,9 +1,13 @@
-use xxhash_rust::xxh3::xxh3_64;
+use xxhash_rust::xxh3::Xxh3;
 
-/// Assigns a metric name to a shard using xxh3 + jump consistent hash.
-pub fn assign_shard(metric_name: &str, num_shards: u32) -> u32 {
-    let hash = xxh3_64(metric_name.as_bytes());
-    jump_consistent_hash(hash, num_shards)
+/// Assigns a metric series to a shard by hashing `name\x00label_key` without
+/// allocating an intermediate String.
+pub fn assign_shard_from_parts(name: &str, label_key: &str, num_shards: u32) -> u32 {
+    let mut h = Xxh3::new();
+    h.update(name.as_bytes());
+    h.update(b"\x00");
+    h.update(label_key.as_bytes());
+    jump_consistent_hash(h.digest(), num_shards)
 }
 
 /// Jump consistent hash algorithm (Lamping & Veach, 2014).
@@ -18,6 +22,14 @@ fn jump_consistent_hash(mut key: u64, num_buckets: u32) -> u32 {
             as i64;
     }
     b as u32
+}
+
+/// Only compiled in test builds; used by unit tests in this module and integration tests.
+#[cfg(test)]
+pub(crate) fn assign_shard(metric_name: &str, num_shards: u32) -> u32 {
+    use xxhash_rust::xxh3::xxh3_64;
+    let hash = xxh3_64(metric_name.as_bytes());
+    jump_consistent_hash(hash, num_shards)
 }
 
 #[cfg(test)]

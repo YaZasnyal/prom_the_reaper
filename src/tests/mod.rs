@@ -9,10 +9,11 @@ use axum::routing::get;
 use axum_test::TestServer;
 use flate2::read::GzDecoder;
 
-use crate::hasher::assign_shard;
-use crate::parser::parse_families;
+use crate::parser::{extract_sorted_label_key, parse_families};
 use crate::server::router;
 use crate::state::{ShardedState, SharedState, SourceStatus, build_shards, empty_state};
+
+use crate::hasher::assign_shard;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -470,7 +471,7 @@ async fn consistent_hashing_minimal_movement() {
         .flat_map(|f| {
             f.samples
                 .iter()
-                .map(|s| format!("{}\x00{}", f.name, s.label_key))
+                .map(|s| format!("{}\x00{}", f.name, extract_sorted_label_key(&s.raw_line)))
         })
         .collect();
 

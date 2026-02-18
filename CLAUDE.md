@@ -17,6 +17,19 @@ cargo run -- generate-config > config.toml
 
 `RUST_LOG=debug` for verbose output. Default log level is `info`.
 
+## Git workflow
+
+Always create a new branch for every change. Changes are merged via MR (merge request).
+
+```bash
+git checkout -b <type>/<short-description>
+# make changes
+git commit
+# push and open MR
+```
+
+Never commit directly to `main`.
+
 ## Tests
 
 ```bash
