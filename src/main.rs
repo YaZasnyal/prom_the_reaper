@@ -7,6 +7,9 @@ mod state;
 #[cfg(test)]
 mod tests;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

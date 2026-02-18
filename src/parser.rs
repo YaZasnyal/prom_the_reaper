@@ -138,7 +138,13 @@ pub fn merge_families(families: Vec<ParsedFamily>) -> (Vec<ParsedFamily>, MergeS
         }
     }
 
-    (merged, MergeStats { duplicate_count, examples })
+    (
+        merged,
+        MergeStats {
+            duplicate_count,
+            examples,
+        },
+    )
 }
 
 /// Returns the index of the family with the given name, inserting a new one if needed.
@@ -162,9 +168,7 @@ fn first_token(s: &str) -> &str {
 
 /// Extracts the metric name from a sample line (everything before `{` or first space).
 fn extract_metric_name(line: &str) -> &str {
-    let end = line
-        .find(|c: char| c == '{' || c == ' ')
-        .unwrap_or(line.len());
+    let end = line.find(['{', ' ']).unwrap_or(line.len());
     &line[..end]
 }
 
@@ -372,7 +376,10 @@ http_req_duration_seconds_count 200
             .iter()
             .find(|s| s.label_key == r#"cpu="1""#)
             .expect("cpu=1 sample must exist");
-        assert!(kept.raw_line.contains("20"), "first-seen value must be kept");
+        assert!(
+            kept.raw_line.contains("20"),
+            "first-seen value must be kept"
+        );
     }
 
     #[test]
