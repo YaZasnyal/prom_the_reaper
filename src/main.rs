@@ -40,6 +40,13 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Return freed memory to the OS promptly instead of the default 1 s delay.
+    // Can be overridden at runtime via MIMALLOC_PURGE_DELAY env var.
+    if std::env::var_os("MIMALLOC_PURGE_DELAY").is_none() {
+        // SAFETY: called before any threads are spawned (tokio runtime starts after this).
+        unsafe { std::env::set_var("MIMALLOC_PURGE_DELAY", "0") };
+    }
+
     let cli = Cli::parse();
 
     if let Some(Command::GenerateConfig) = cli.command {
