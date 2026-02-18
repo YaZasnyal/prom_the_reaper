@@ -40,11 +40,16 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Return freed memory to the OS promptly instead of the default 1 s delay.
-    // Can be overridden at runtime via MIMALLOC_PURGE_DELAY env var.
+    // Return freed memory to the OS immediately instead of the default 10 ms delay.
+    // mi_option_set overwrites the value even after mimalloc has initialised, so
+    // this is reliable regardless of when the allocator first ran.
+    // MIMALLOC_PURGE_DELAY in the environment still takes precedence because
+    // mimalloc reads env vars before this point; we only set it when the env var
+    // was not provided.
     if std::env::var_os("MIMALLOC_PURGE_DELAY").is_none() {
-        // SAFETY: called before any threads are spawned (tokio runtime starts after this).
-        unsafe { std::env::set_var("MIMALLOC_PURGE_DELAY", "0") };
+        // mi_option_purge_delay = 17 (index in the options array / enum value).
+        // SAFETY: mi_option_set is thread-safe per mimalloc docs.
+        unsafe { libmimalloc_sys::mi_option_set(17, 0) };
     }
 
     let cli = Cli::parse();
