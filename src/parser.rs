@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// A single parsed sample line, preserving the original text.
 pub struct Sample {
@@ -16,6 +16,80 @@ pub struct ParsedFamily {
     pub type_line: Option<String>,
     /// Individual sample lines.
     pub samples: Vec<Sample>,
+}
+
+/// Injects extra labels into every sample of the given families.
+///
+/// Labels are appended to any existing label set on each sample line (or
+/// inserted as the only labels when the sample has none). Keys are sorted
+/// alphabetically for deterministic output. Label values are escaped per the
+/// Prometheus text format (`\` → `\\`, `"` → `\"`).
+///
+/// Because the labels are written into each `Sample::raw_line`, the existing
+/// hashing pipeline (`extract_sorted_label_key` → `assign_shard_from_parts`)
+/// automatically includes them in the consistent-hash key.
+pub fn inject_labels(families: &mut [ParsedFamily], extra: &HashMap<String, String>) {
+    if extra.is_empty() {
+        return;
+    }
+
+    // BTreeMap gives us sorted-by-key iteration for free.
+    let sorted: BTreeMap<&str, &str> = extra
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+
+    // Pre-render once: `k1="v1",k2="v2"` (keys already in alphabetical order).
+    let extra_str: String = sorted
+        .iter()
+        .map(|(k, v)| format!("{}=\"{}\"", k, escape_label_value(v)))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    for family in families.iter_mut() {
+        for sample in family.samples.iter_mut() {
+            sample.raw_line = inject_into_line(&sample.raw_line, &extra_str);
+        }
+    }
+}
+
+/// Escapes a Prometheus label value: `\` → `\\`, `"` → `\"`.
+fn escape_label_value(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Injects a pre-rendered `k="v",...` fragment into a single sample line.
+///
+/// Handles three cases:
+/// - `metric{existing} value` → `metric{existing,extra} value`
+/// - `metric{} value`         → `metric{extra} value`
+/// - `metric value`           → `metric{extra} value`
+///
+/// The trailing `\n` is preserved.
+fn inject_into_line(line: &str, extra_str: &str) -> String {
+    let content = line.strip_suffix('\n').unwrap_or(line);
+
+    if let Some(open) = content.find('{') {
+        let close = content.rfind('}').unwrap_or(content.len());
+        let existing = &content[open + 1..close];
+        let after = &content[close + 1..];
+
+        let labels = if existing.is_empty() {
+            extra_str.to_owned()
+        } else {
+            format!("{},{}", existing, extra_str)
+        };
+        format!("{}{{{}}}{}\n", &content[..open], labels, after)
+    } else {
+        // No braces: `metric_name value [timestamp]`
+        let space = content.find(' ').unwrap_or(content.len());
+        format!(
+            "{}{{{}}}{}\n",
+            &content[..space],
+            extra_str,
+            &content[space..]
+        )
+    }
 }
 
 /// Parses Prometheus exposition format text into metric families.
@@ -382,6 +456,85 @@ http_req_duration_seconds_count 200
             kept.raw_line.contains("20"),
             "first-seen value must be kept"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // inject_labels tests
+    // ------------------------------------------------------------------
+
+    fn labels(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn inject_labels_into_metric_without_labels() {
+        let mut families = parse_families("up 1\n");
+        inject_labels(&mut families, &labels(&[("cluster", "prod")]));
+        assert_eq!(families[0].samples[0].raw_line, "up{cluster=\"prod\"} 1\n");
+    }
+
+    #[test]
+    fn inject_labels_into_metric_with_existing_labels() {
+        let mut families = parse_families("req{method=\"GET\"} 42\n");
+        inject_labels(&mut families, &labels(&[("cluster", "prod")]));
+        assert_eq!(
+            families[0].samples[0].raw_line,
+            "req{method=\"GET\",cluster=\"prod\"} 42\n"
+        );
+    }
+
+    #[test]
+    fn inject_labels_preserves_timestamp() {
+        let mut families = parse_families("up 1 1700000000\n");
+        inject_labels(&mut families, &labels(&[("dc", "eu")]));
+        assert_eq!(
+            families[0].samples[0].raw_line,
+            "up{dc=\"eu\"} 1 1700000000\n"
+        );
+    }
+
+    #[test]
+    fn inject_labels_multiple_sorted_alphabetically() {
+        let mut families = parse_families("up 1\n");
+        inject_labels(
+            &mut families,
+            &labels(&[("zone", "a"), ("cluster", "prod")]),
+        );
+        // BTreeMap sorts keys: cluster < zone
+        assert_eq!(
+            families[0].samples[0].raw_line,
+            "up{cluster=\"prod\",zone=\"a\"} 1\n"
+        );
+    }
+
+    #[test]
+    fn inject_labels_escapes_special_chars_in_value() {
+        let mut families = parse_families("up 1\n");
+        inject_labels(&mut families, &labels(&[("label", "val\\with\"quotes")]));
+        assert_eq!(
+            families[0].samples[0].raw_line,
+            "up{label=\"val\\\\with\\\"quotes\"} 1\n"
+        );
+    }
+
+    #[test]
+    fn inject_labels_empty_extra_is_noop() {
+        let input = "up 1\n";
+        let mut families = parse_families(input);
+        inject_labels(&mut families, &HashMap::new());
+        assert_eq!(families[0].samples[0].raw_line, "up 1\n");
+    }
+
+    #[test]
+    fn inject_labels_affects_shard_key() {
+        // With extra labels, extract_sorted_label_key must return a non-empty key.
+        let mut families = parse_families("up 1\n");
+        inject_labels(&mut families, &labels(&[("cluster", "prod")]));
+        let key = extract_sorted_label_key(&families[0].samples[0].raw_line);
+        assert_eq!(key, r#"cluster="prod""#);
     }
 
     #[test]

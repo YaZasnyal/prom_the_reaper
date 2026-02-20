@@ -19,6 +19,10 @@ pub struct SourceConfig {
     pub timeout_secs: u64,
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// Extra labels to attach to every time series scraped from this source.
+    /// Included in the consistent-hashing key, so they affect shard assignment.
+    #[serde(default)]
+    pub extra_labels: HashMap<String, String>,
 }
 
 fn default_timeout() -> u64 {
@@ -53,7 +57,28 @@ impl AppConfig {
                 "source[{}] timeout_secs must be greater than 0",
                 i
             );
+            for name in source.extra_labels.keys() {
+                ensure!(
+                    is_valid_label_name(name),
+                    "source[{}] extra_labels: {:?} is not a valid Prometheus label name \
+                     (must match [a-zA-Z_][a-zA-Z0-9_]*)",
+                    i,
+                    name
+                );
+            }
         }
         Ok(())
+    }
+}
+
+/// Validates that a string is a legal Prometheus label name: `[a-zA-Z_][a-zA-Z0-9_]*`.
+fn is_valid_label_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => false,
+        Some(c) => {
+            (c.is_ascii_alphabetic() || c == '_')
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
     }
 }

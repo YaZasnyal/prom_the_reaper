@@ -109,6 +109,8 @@ scrape_interval_secs = 30
 [[sources]]
 url = "http://ceph-exporter:9283/metrics"
 timeout_secs = 25
+# headers = {}        # optional: extra HTTP request headers
+# extra_labels = {}   # optional: labels added to every series from this source
 
 # Scrape own operational metrics (shard sizes, scrape durations, etc.)
 # exposed at /metrics. Adjust the address to match "listen" above.
@@ -116,8 +118,10 @@ timeout_secs = 25
 url = "http://127.0.0.1:9090/metrics"
 timeout_secs = 5
 
+# Another source with all optional fields shown:
 # [[sources]]
 # url = "http://node-exporter:9100/metrics"
 # timeout_secs = 10
 # headers = { "Authorization" = "Bearer token123" }
+# extra_labels = { cluster = "prod", datacenter = "eu-west-1" }
 "#;

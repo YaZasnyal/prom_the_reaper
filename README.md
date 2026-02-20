@@ -19,6 +19,8 @@ Point a separate Prometheus at each shard.
   ~1/N of series move; the rest stay on the same shard
 - **Multiple sources** — scrape several upstream exporters in parallel; all metrics are
   merged and sharded together
+- **Per-source extra labels** — attach arbitrary labels to every series from a source;
+  labels are included in the hash key so shard assignment stays consistent
 - **Zero-allocation serving** — shard responses are pre-built in the background and
   served via atomic pointer swap (ArcSwap); no locks on the hot path
 - **Gzip** — all endpoints support `Accept-Encoding: gzip` via middleware
@@ -56,6 +58,31 @@ timeout_secs = 25
 # url = "http://node-exporter:9100/metrics"
 # timeout_secs = 10
 # headers = { "Authorization" = "Bearer token" }
+# extra_labels = { cluster = "prod", datacenter = "eu-west-1" }
+```
+
+### Source parameters
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `url` | yes | — | URL of the upstream `/metrics` endpoint |
+| `timeout_secs` | no | `10` | Per-request timeout in seconds |
+| `headers` | no | `{}` | Extra HTTP headers (e.g. `Authorization`) |
+| `extra_labels` | no | `{}` | Labels added to every series scraped from this source; included in the consistent-hash key |
+
+`extra_labels` is useful when multiple instances of the same exporter run in different
+clusters and you want to distinguish their metrics in Prometheus without relabelling:
+
+```toml
+[[sources]]
+url = "http://ceph-cluster-a:9283/metrics"
+timeout_secs = 25
+extra_labels = { cluster = "a" }
+
+[[sources]]
+url = "http://ceph-cluster-b:9283/metrics"
+timeout_secs = 25
+extra_labels = { cluster = "b" }
 ```
 
 ### Run
@@ -172,6 +199,6 @@ curl -H 'Accept-Encoding: gzip' http://127.0.0.1:9090/metrics/shard/0 | gunzip |
 cargo test
 ```
 
-29 tests: unit tests for parser and hasher, integration tests covering HTTP endpoints,
-gzip, high-cardinality sharding, no lost/duplicated series, and a full end-to-end scrape
-cycle against a real mock upstream.
+41 tests: unit tests for parser (including `inject_labels`) and hasher, integration tests
+covering HTTP endpoints, gzip, high-cardinality sharding, no lost/duplicated series,
+and a full end-to-end scrape cycle against a real mock upstream.

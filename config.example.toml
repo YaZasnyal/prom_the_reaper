@@ -11,13 +11,26 @@ num_shards = 4
 # How often to scrape upstream sources (seconds)
 scrape_interval_secs = 30
 
-# Upstream Prometheus-compatible metric sources
+# Upstream Prometheus-compatible metric sources.
+# All sources are scraped in parallel and their metrics are merged before sharding.
 
 [[sources]]
 url = "http://localhost:9100/metrics"
 timeout_secs = 25
+# headers = {}        # optional: extra HTTP request headers
+# extra_labels = {}   # optional: labels added to every series from this source
 
+# Source with custom HTTP headers (e.g. bearer auth):
 # [[sources]]
 # url = "http://node-exporter:9100/metrics"
 # timeout_secs = 10
 # headers = { "Authorization" = "Bearer token123" }
+
+# Source with extra labels — useful when scraping multiple clusters through
+# one proxy so each cluster's metrics remain distinguishable in Prometheus.
+# extra_labels are included in the consistent-hash key, so they affect
+# which shard a series lands on, but never change when the labels are stable.
+# [[sources]]
+# url = "http://ceph-cluster-b:9283/metrics"
+# timeout_secs = 25
+# extra_labels = { cluster = "b", datacenter = "eu-west-1" }
