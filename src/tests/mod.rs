@@ -418,6 +418,7 @@ async fn full_scrape_cycle_with_mock_upstream() {
             url: upstream_url,
             timeout_secs: 5,
             headers: HashMap::new(),
+            extra_labels: HashMap::new(),
         }],
     });
 

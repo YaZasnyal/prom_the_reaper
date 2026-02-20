@@ -7,7 +7,7 @@ use tokio::time;
 use tracing::{error, info, warn};
 
 use crate::config::{AppConfig, SourceConfig};
-use crate::parser::{merge_families, parse_families};
+use crate::parser::{inject_labels, merge_families, parse_families};
 use crate::state::{ShardedState, SharedState, SourceStatus, build_shards};
 
 pub async fn run_scrape_loop(config: Arc<AppConfig>, state: SharedState) {
@@ -97,6 +97,7 @@ async fn scrape_all(client: &Client, sources: &[SourceConfig]) -> Vec<ScrapeResu
         let url = source.url.clone();
         let timeout = Duration::from_secs(source.timeout_secs);
         let headers = source.headers.clone();
+        let extra_labels = source.extra_labels.clone();
 
         join_set.spawn(async move {
             let start = Instant::now();
@@ -113,7 +114,8 @@ async fn scrape_all(client: &Client, sources: &[SourceConfig]) -> Vec<ScrapeResu
 
             match result {
                 Ok(body) => {
-                    let families = parse_families(&body);
+                    let mut families = parse_families(&body);
+                    inject_labels(&mut families, &extra_labels);
                     let duration = start.elapsed();
                     (url, Ok((families, duration)))
                 }

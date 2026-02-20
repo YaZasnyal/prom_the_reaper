@@ -120,4 +120,5 @@ timeout_secs = 5
 # url = "http://node-exporter:9100/metrics"
 # timeout_secs = 10
 # headers = { "Authorization" = "Bearer token123" }
+# extra_labels = { cluster = "prod", datacenter = "eu-west-1" }
 "#;
