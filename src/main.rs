@@ -36,6 +36,8 @@ struct Cli {
 enum Command {
     /// Print a sample configuration file and exit
     GenerateConfig,
+    /// Print version and exit
+    Version,
 }
 
 #[tokio::main]
@@ -54,9 +56,16 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    if let Some(Command::GenerateConfig) = cli.command {
-        print!("{}", SAMPLE_CONFIG);
-        return Ok(());
+    match cli.command {
+        Some(Command::GenerateConfig) => {
+            print!("{}", SAMPLE_CONFIG);
+            return Ok(());
+        }
+        Some(Command::Version) => {
+            println!("{}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        None => {}
     }
 
     tracing_subscriber::fmt()
