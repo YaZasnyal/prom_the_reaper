@@ -28,7 +28,7 @@ pub struct ParsedFamily {
 /// Because the labels are written into each `Sample::raw_line`, the existing
 /// hashing pipeline (`extract_sorted_label_key` → `assign_shard_from_parts`)
 /// automatically includes them in the consistent-hash key.
-pub fn inject_labels(families: &mut Vec<ParsedFamily>, extra: &HashMap<String, String>) {
+pub fn inject_labels(families: &mut [ParsedFamily], extra: &HashMap<String, String>) {
     if extra.is_empty() {
         return;
     }
@@ -499,7 +499,10 @@ http_req_duration_seconds_count 200
     #[test]
     fn inject_labels_multiple_sorted_alphabetically() {
         let mut families = parse_families("up 1\n");
-        inject_labels(&mut families, &labels(&[("zone", "a"), ("cluster", "prod")]));
+        inject_labels(
+            &mut families,
+            &labels(&[("zone", "a"), ("cluster", "prod")]),
+        );
         // BTreeMap sorts keys: cluster < zone
         assert_eq!(
             families[0].samples[0].raw_line,
@@ -510,10 +513,7 @@ http_req_duration_seconds_count 200
     #[test]
     fn inject_labels_escapes_special_chars_in_value() {
         let mut families = parse_families("up 1\n");
-        inject_labels(
-            &mut families,
-            &labels(&[("label", "val\\with\"quotes")]),
-        );
+        inject_labels(&mut families, &labels(&[("label", "val\\with\"quotes")]));
         assert_eq!(
             families[0].samples[0].raw_line,
             "up{label=\"val\\\\with\\\"quotes\"} 1\n"
