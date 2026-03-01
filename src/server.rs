@@ -47,14 +47,17 @@ async fn shard_handler(
     }
 
     let text = guard.shards[id as usize].text.clone(); // O(1) ref-count bump
-    axum::http::Response::builder()
+    match axum::http::Response::builder()
         .status(StatusCode::OK)
         .header(
             header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
         )
         .body(Body::from(text))
-        .unwrap()
+    {
+        Ok(response) => response,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "failed to build response").into_response(),
+    }
 }
 
 async fn health_handler(State(state): State<SharedState>) -> Response {
