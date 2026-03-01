@@ -516,3 +516,29 @@ async fn single_shard_shard1_returns_404() {
         .await
         .assert_status(StatusCode::NOT_FOUND);
 }
+
+// ---------------------------------------------------------------------------
+// families_count validation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn families_count_is_correct() {
+    let families = parse_families(SAMPLE_METRICS);
+    let shards = build_shards(families, NUM_SHARDS);
+
+    for (shard_id, shard) in shards.iter().enumerate() {
+        let text = String::from_utf8_lossy(&shard.text);
+        let type_lines = text.matches("# TYPE ").count();
+        assert_eq!(
+            shard.families_count, type_lines,
+            "shard {shard_id}: families_count ({}) != # TYPE lines ({})",
+            shard.families_count, type_lines
+        );
+    }
+
+    let total_series: usize = shards.iter().map(|s| s.series_count).sum();
+    assert!(
+        total_series > 0,
+        "expected at least some series across shards"
+    );
+}
