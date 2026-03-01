@@ -1,15 +1,12 @@
 use axum::{
     body::Body,
     extract::State,
-    http::{header, Response, StatusCode},
+    http::{Response, StatusCode, header},
     response::IntoResponse,
 };
 use prometheus_client::{
-    encoding::text::encode,
-    metrics::family::Family,
-    metrics::gauge::Gauge,
-    encoding::EncodeLabelSet,
-    registry::Registry,
+    encoding::EncodeLabelSet, encoding::text::encode, metrics::family::Family,
+    metrics::gauge::Gauge, registry::Registry,
 };
 use tracing::error;
 
@@ -89,11 +86,15 @@ pub async fn self_metrics_handler(
     let source_scrape_duration: Family<UrlLabel, Gauge<i64>> = Family::default();
     for src in &guard.source_status {
         source_up
-            .get_or_create(&UrlLabel { url: src.url.clone() })
+            .get_or_create(&UrlLabel {
+                url: src.url.clone(),
+            })
             .set(if src.success { 1 } else { 0 });
         // Note: prometheus-client only supports i64, so we round to seconds.
         source_scrape_duration
-            .get_or_create(&UrlLabel { url: src.url.clone() })
+            .get_or_create(&UrlLabel {
+                url: src.url.clone(),
+            })
             .set(src.duration.as_secs() as i64);
     }
     registry.register(
@@ -120,10 +121,7 @@ pub async fn self_metrics_handler(
         error!("failed to encode self-metrics: {}", e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            [(
-                header::CONTENT_TYPE,
-                "text/plain; charset=utf-8",
-            )],
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
             "failed to encode metrics".to_string(),
         )
             .into_response();

@@ -121,4 +121,3 @@ async fn status_handler(State(state): State<SharedState>, num_shards: u32) -> Re
     )
         .into_response()
 }
-
