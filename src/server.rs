@@ -56,7 +56,11 @@ async fn shard_handler(
         .body(Body::from(text))
     {
         Ok(response) => response,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "failed to build response").into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to build response",
+        )
+            .into_response(),
     }
 }
 
