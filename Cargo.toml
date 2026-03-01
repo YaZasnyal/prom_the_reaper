@@ -21,6 +21,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
+prometheus-client = "0.22"
 
 [dev-dependencies]
 axum-test = "17"

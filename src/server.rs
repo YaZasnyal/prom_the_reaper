@@ -7,6 +7,7 @@ use axum::routing::get;
 use serde_json::json;
 use tower_http::compression::CompressionLayer;
 
+use crate::self_metrics;
 use crate::state::SharedState;
 
 pub fn router(state: SharedState, num_shards: u32) -> Router {
@@ -22,7 +23,7 @@ pub fn router(state: SharedState, num_shards: u32) -> Router {
         )
         .route(
             "/metrics",
-            get(move |state| self_metrics_handler(state, num_shards)),
+            get(move |state| self_metrics::self_metrics_handler(state, num_shards)),
         )
         .layer(CompressionLayer::new())
         .with_state(state)
@@ -117,89 +118,6 @@ async fn status_handler(State(state): State<SharedState>, num_shards: u32) -> Re
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
         body.to_string(),
-    )
-        .into_response()
-}
-
-async fn self_metrics_handler(State(state): State<SharedState>, num_shards: u32) -> Response {
-    let guard = state.load();
-    let mut out = String::new();
-
-    // last scrape age
-    out.push_str("# HELP prom_reaper_last_scrape_age_seconds Seconds since the last successful scrape cycle.\n");
-    out.push_str("# TYPE prom_reaper_last_scrape_age_seconds gauge\n");
-    if guard.shards.is_empty() {
-        out.push_str("prom_reaper_last_scrape_age_seconds NaN\n");
-    } else {
-        out.push_str(&format!(
-            "prom_reaper_last_scrape_age_seconds {:.3}\n",
-            guard.last_scrape.elapsed().as_secs_f64()
-        ));
-    }
-
-    // per-shard series and families
-    out.push_str("# HELP prom_reaper_shard_series Number of time series in a shard.\n");
-    out.push_str("# TYPE prom_reaper_shard_series gauge\n");
-    for (i, shard) in guard.shards.iter().enumerate() {
-        out.push_str(&format!(
-            "prom_reaper_shard_series{{shard=\"{}\"}} {}\n",
-            i, shard.series_count
-        ));
-    }
-
-    out.push_str("# HELP prom_reaper_shard_families Number of metric families in a shard.\n");
-    out.push_str("# TYPE prom_reaper_shard_families gauge\n");
-    for (i, shard) in guard.shards.iter().enumerate() {
-        out.push_str(&format!(
-            "prom_reaper_shard_families{{shard=\"{}\"}} {}\n",
-            i, shard.families_count
-        ));
-    }
-
-    out.push_str(
-        "# HELP prom_reaper_shard_size_bytes Size of a shard's uncompressed text in bytes.\n",
-    );
-    out.push_str("# TYPE prom_reaper_shard_size_bytes gauge\n");
-    for (i, shard) in guard.shards.iter().enumerate() {
-        out.push_str(&format!(
-            "prom_reaper_shard_size_bytes{{shard=\"{}\"}} {}\n",
-            i,
-            shard.text.len()
-        ));
-    }
-
-    // per-source scrape status
-    out.push_str("# HELP prom_reaper_source_up Whether the last scrape of a source succeeded (1 = success, 0 = failure).\n");
-    out.push_str("# TYPE prom_reaper_source_up gauge\n");
-    for src in &guard.source_status {
-        out.push_str(&format!(
-            "prom_reaper_source_up{{url=\"{}\"}} {}\n",
-            src.url,
-            if src.success { 1 } else { 0 }
-        ));
-    }
-
-    out.push_str("# HELP prom_reaper_source_scrape_duration_seconds Duration of the last scrape for a source.\n");
-    out.push_str("# TYPE prom_reaper_source_scrape_duration_seconds gauge\n");
-    for src in &guard.source_status {
-        out.push_str(&format!(
-            "prom_reaper_source_scrape_duration_seconds{{url=\"{}\"}} {:.3}\n",
-            src.url,
-            src.duration.as_secs_f64()
-        ));
-    }
-
-    out.push_str("# HELP prom_reaper_num_shards Configured number of shards.\n");
-    out.push_str("# TYPE prom_reaper_num_shards gauge\n");
-    out.push_str(&format!("prom_reaper_num_shards {num_shards}\n"));
-
-    (
-        StatusCode::OK,
-        [(
-            header::CONTENT_TYPE,
-            "text/plain; version=0.0.4; charset=utf-8",
-        )],
-        out,
     )
         .into_response()
 }
