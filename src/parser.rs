@@ -173,17 +173,16 @@ pub struct MergeStats {
 pub fn merge_families(families: Vec<ParsedFamily>) -> (Vec<ParsedFamily>, MergeStats) {
     let mut merged: Vec<ParsedFamily> = Vec::new();
     let mut name_to_idx: HashMap<String, usize> = HashMap::new();
+    let mut name_to_keys: HashMap<String, HashSet<String>> = HashMap::new();
     let mut duplicate_count = 0usize;
     let mut examples: Vec<String> = Vec::new();
 
     for family in families {
         if let Some(&idx) = name_to_idx.get(&family.name) {
-            // Family already present — merge samples, first-wins on label_key collisions.
-            let existing_keys: HashSet<String> = merged[idx]
-                .samples
-                .iter()
-                .map(|s| extract_sorted_label_key(&s.raw_line))
-                .collect();
+            // SAFETY: `name_to_idx` and `name_to_keys` are always inserted together
+            // in the else-branch below, so if `name_to_idx` contains the key,
+            // `name_to_keys` must also contain it.
+            let existing_keys = name_to_keys.get_mut(&family.name).unwrap();
 
             for sample in family.samples {
                 let label_key = extract_sorted_label_key(&sample.raw_line);
@@ -198,12 +197,19 @@ pub fn merge_families(families: Vec<ParsedFamily>) -> (Vec<ParsedFamily>, MergeS
                         examples.push(example);
                     }
                 } else {
+                    existing_keys.insert(label_key);
                     merged[idx].samples.push(sample);
                 }
             }
         } else {
+            let keys: HashSet<String> = family
+                .samples
+                .iter()
+                .map(|s| extract_sorted_label_key(&s.raw_line))
+                .collect();
             let idx = merged.len();
             name_to_idx.insert(family.name.clone(), idx);
+            name_to_keys.insert(family.name.clone(), keys);
             merged.push(family);
         }
     }
