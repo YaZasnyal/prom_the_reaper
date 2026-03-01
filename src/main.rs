@@ -2,6 +2,7 @@ mod config;
 mod hasher;
 mod parser;
 mod scraper;
+mod self_metrics;
 mod server;
 mod state;
 #[cfg(test)]
