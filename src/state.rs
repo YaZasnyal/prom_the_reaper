@@ -6,7 +6,7 @@ use arc_swap::ArcSwap;
 use bytes::Bytes;
 
 use crate::hasher::assign_shard_from_parts;
-use crate::parser::{ParsedFamily, extract_metric_name, extract_sorted_label_key};
+use crate::parser::{ParsedFamily, extract_metric_name};
 
 pub type SharedState = Arc<ArcSwap<ShardedState>>;
 
@@ -37,7 +37,23 @@ pub struct SourceStatus {
 /// per-series distribution. HELP and TYPE headers are emitted into a shard
 /// the first time any series of that family appears there.
 pub fn build_shards(families: Vec<ParsedFamily>, num_shards: u32) -> Vec<ShardData> {
-    let mut shard_texts: Vec<String> = (0..num_shards).map(|_| String::new()).collect();
+    // Estimate total text size for pre-allocation.
+    let total_size: usize = families
+        .iter()
+        .flat_map(|f| {
+            let header_size = f.help_line.as_ref().map_or(0, |h| h.len())
+                + f.type_line.as_ref().map_or(0, |t| t.len());
+            // Worst case: every sample triggers a header copy in its shard.
+            f.samples
+                .iter()
+                .map(move |s| s.raw_line.len() + header_size)
+        })
+        .sum();
+    let per_shard = total_size / num_shards as usize + 1;
+
+    let mut shard_texts: Vec<String> = (0..num_shards)
+        .map(|_| String::with_capacity(per_shard))
+        .collect();
     let mut shard_families: Vec<usize> = vec![0; num_shards as usize];
     let mut shard_series: Vec<usize> = vec![0; num_shards as usize];
     // Tracks which (shard_idx, family_name) pairs have had their header written.
@@ -46,11 +62,10 @@ pub fn build_shards(families: Vec<ParsedFamily>, num_shards: u32) -> Vec<ShardDa
 
     for family in &families {
         for sample in &family.samples {
-            // Compute hash key inline from raw_line to avoid storing label_key in Sample.
             let sample_name = extract_metric_name(&sample.raw_line);
-            let label_key = extract_sorted_label_key(&sample.raw_line);
-            // Build hash key without a heap allocation: hash name + NUL + labels directly.
-            let shard_id = assign_shard_from_parts(sample_name, &label_key, num_shards) as usize;
+            // Use pre-computed label_key from Sample instead of re-parsing.
+            let shard_id =
+                assign_shard_from_parts(sample_name, &sample.label_key, num_shards) as usize;
 
             // Emit HELP/TYPE the first time this family appears in this shard.
             // insert() returns true only when the key is newly added, so this

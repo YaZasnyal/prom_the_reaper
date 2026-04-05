@@ -4,21 +4,33 @@ use std::time::{Duration, Instant};
 use reqwest::Client;
 use tokio::task::JoinSet;
 use tokio::time;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::config::{AppConfig, SourceConfig};
-use crate::parser::{inject_labels, merge_families, parse_families};
+use crate::parser::parse_families;
 use crate::state::{ShardedState, SharedState, SourceStatus, build_shards};
+use crate::transform::{inject_labels, merge_families};
 
-pub async fn run_scrape_loop(config: Arc<AppConfig>, state: SharedState) {
+pub async fn run_scrape_loop(config: Arc<AppConfig>, state: SharedState, cancel: CancellationToken) {
     let client = Client::builder()
+        .user_agent(format!("prom_the_reaper/{}", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(10))
+        .pool_max_idle_per_host(2)
         .build()
         .expect("failed to build HTTP client");
 
     let mut interval = time::interval(Duration::from_secs(config.scrape_interval_secs));
 
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("scrape loop cancelled, exiting");
+                return;
+            }
+            _ = interval.tick() => {}
+        }
+
         info!("starting scrape cycle");
         let scrape_start = Instant::now();
 

@@ -1,9 +1,11 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashMap;
 
 /// A single parsed sample line, preserving the original text.
 pub struct Sample {
     /// The original verbatim line (including trailing newline).
     pub raw_line: String,
+    /// Canonical sorted label key, cached to avoid re-parsing in build_shards/merge.
+    pub label_key: String,
 }
 
 /// A parsed metric family.
@@ -18,80 +20,6 @@ pub struct ParsedFamily {
     pub samples: Vec<Sample>,
 }
 
-/// Injects extra labels into every sample of the given families.
-///
-/// Labels are appended to any existing label set on each sample line (or
-/// inserted as the only labels when the sample has none). Keys are sorted
-/// alphabetically for deterministic output. Label values are escaped per the
-/// Prometheus text format (`\` → `\\`, `"` → `\"`).
-///
-/// Because the labels are written into each `Sample::raw_line`, the existing
-/// hashing pipeline (`extract_sorted_label_key` → `assign_shard_from_parts`)
-/// automatically includes them in the consistent-hash key.
-pub fn inject_labels(families: &mut [ParsedFamily], extra: &HashMap<String, String>) {
-    if extra.is_empty() {
-        return;
-    }
-
-    // BTreeMap gives us sorted-by-key iteration for free.
-    let sorted: BTreeMap<&str, &str> = extra
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-
-    // Pre-render once: `k1="v1",k2="v2"` (keys already in alphabetical order).
-    let extra_str: String = sorted
-        .iter()
-        .map(|(k, v)| format!("{}=\"{}\"", k, escape_label_value(v)))
-        .collect::<Vec<_>>()
-        .join(",");
-
-    for family in families.iter_mut() {
-        for sample in family.samples.iter_mut() {
-            sample.raw_line = inject_into_line(&sample.raw_line, &extra_str);
-        }
-    }
-}
-
-/// Escapes a Prometheus label value: `\` → `\\`, `"` → `\"`.
-fn escape_label_value(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-/// Injects a pre-rendered `k="v",...` fragment into a single sample line.
-///
-/// Handles three cases:
-/// - `metric{existing} value` → `metric{existing,extra} value`
-/// - `metric{} value`         → `metric{extra} value`
-/// - `metric value`           → `metric{extra} value`
-///
-/// The trailing `\n` is preserved.
-fn inject_into_line(line: &str, extra_str: &str) -> String {
-    let content = line.strip_suffix('\n').unwrap_or(line);
-
-    if let Some(open) = content.find('{') {
-        let close = content.rfind('}').unwrap_or(content.len());
-        let existing = &content[open + 1..close];
-        let after = &content[close + 1..];
-
-        let labels = if existing.is_empty() {
-            extra_str.to_owned()
-        } else {
-            format!("{},{}", existing, extra_str)
-        };
-        format!("{}{{{}}}{}\n", &content[..open], labels, after)
-    } else {
-        // No braces: `metric_name value [timestamp]`
-        let space = content.find(' ').unwrap_or(content.len());
-        format!(
-            "{}{{{}}}{}\n",
-            &content[..space],
-            extra_str,
-            &content[space..]
-        )
-    }
-}
-
 /// Parses Prometheus exposition format text into metric families.
 ///
 /// Groups HELP, TYPE, and sample lines by metric base name.
@@ -99,6 +27,8 @@ fn inject_into_line(line: &str, extra_str: &str) -> String {
 /// are grouped with their base metric via the TYPE declaration.
 pub fn parse_families(input: &str) -> Vec<ParsedFamily> {
     let mut families: Vec<ParsedFamily> = Vec::new();
+    // HashMap index for O(1) family lookup by name.
+    let mut name_to_idx: HashMap<String, usize> = HashMap::new();
     // Index into `families` for the current family being built.
     let mut current_idx: Option<usize> = None;
     // The TYPE-declared base name (may differ from the sample name due to suffixes).
@@ -110,16 +40,16 @@ pub fn parse_families(input: &str) -> Vec<ParsedFamily> {
         }
 
         if let Some(rest) = line.strip_prefix("# HELP ") {
-            let name = first_token(rest).to_owned();
-            let idx = get_or_insert(&mut families, &name);
+            let name = first_token(rest);
+            let idx = get_or_insert(&mut families, &mut name_to_idx, name);
             families[idx].help_line = Some(format!("{line}\n"));
-            current_base = Some(name.clone());
+            current_base = Some(name.to_owned());
             current_idx = Some(idx);
         } else if let Some(rest) = line.strip_prefix("# TYPE ") {
-            let name = first_token(rest).to_owned();
-            let idx = get_or_insert(&mut families, &name);
+            let name = first_token(rest);
+            let idx = get_or_insert(&mut families, &mut name_to_idx, name);
             families[idx].type_line = Some(format!("{line}\n"));
-            current_base = Some(name.clone());
+            current_base = Some(name.to_owned());
             current_idx = Some(idx);
         } else if line.starts_with('#') {
             // Non-HELP/TYPE comment — skip
@@ -134,19 +64,26 @@ pub fn parse_families(input: &str) -> Vec<ParsedFamily> {
             {
                 // Belongs to the current TYPE-declared family.
                 current_idx.unwrap_or_else(|| {
-                    get_or_insert(&mut families, current_base.as_deref().unwrap())
+                    get_or_insert(
+                        &mut families,
+                        &mut name_to_idx,
+                        current_base.as_deref().unwrap(),
+                    )
                 })
             } else {
                 // New family encountered without a TYPE declaration.
-                let base = base_name(sample_name);
-                let idx = get_or_insert(&mut families, base);
-                current_base = Some(base.to_owned());
+                let base = base_name(sample_name).to_owned();
+                let idx = get_or_insert(&mut families, &mut name_to_idx, &base);
+                current_base = Some(base);
                 current_idx = Some(idx);
                 idx
             };
 
+            let raw_line = format!("{line}\n");
+            let label_key = extract_sorted_label_key(&raw_line);
             families[idx].samples.push(Sample {
-                raw_line: format!("{line}\n"),
+                raw_line,
+                label_key,
             });
         }
     }
@@ -156,79 +93,26 @@ pub fn parse_families(input: &str) -> Vec<ParsedFamily> {
     families
 }
 
-/// Statistics returned by [`merge_families`].
-pub struct MergeStats {
-    /// Total number of sample lines dropped because their `(family, label_key)` was already seen.
-    pub duplicate_count: usize,
-    /// Up to three human-readable examples of dropped series (for warn logging).
-    pub examples: Vec<String>,
-}
-
-/// Merges `Vec<ParsedFamily>` collected from multiple sources into a deduplicated list.
-///
-/// When the same `(family_name, label_key)` appears more than once the **first** occurrence
-/// is kept and all subsequent ones are silently dropped (first-wins).  Families with the
-/// same name but distinct label sets are merged into one `ParsedFamily` entry, preserving
-/// their HELP/TYPE from the first source that declared them.
-pub fn merge_families(families: Vec<ParsedFamily>) -> (Vec<ParsedFamily>, MergeStats) {
-    let mut merged: Vec<ParsedFamily> = Vec::new();
-    let mut name_to_idx: HashMap<String, usize> = HashMap::new();
-    let mut duplicate_count = 0usize;
-    let mut examples: Vec<String> = Vec::new();
-
-    for family in families {
-        if let Some(&idx) = name_to_idx.get(&family.name) {
-            // Family already present — merge samples, first-wins on label_key collisions.
-            let existing_keys: HashSet<String> = merged[idx]
-                .samples
-                .iter()
-                .map(|s| extract_sorted_label_key(&s.raw_line))
-                .collect();
-
-            for sample in family.samples {
-                let label_key = extract_sorted_label_key(&sample.raw_line);
-                if existing_keys.contains(&label_key) {
-                    duplicate_count += 1;
-                    if examples.len() < 3 {
-                        let example = if label_key.is_empty() {
-                            family.name.clone()
-                        } else {
-                            format!("{}{{{}}}", family.name, label_key)
-                        };
-                        examples.push(example);
-                    }
-                } else {
-                    merged[idx].samples.push(sample);
-                }
-            }
-        } else {
-            let idx = merged.len();
-            name_to_idx.insert(family.name.clone(), idx);
-            merged.push(family);
-        }
-    }
-
-    (
-        merged,
-        MergeStats {
-            duplicate_count,
-            examples,
-        },
-    )
-}
-
 /// Returns the index of the family with the given name, inserting a new one if needed.
-fn get_or_insert(families: &mut Vec<ParsedFamily>, name: &str) -> usize {
-    if let Some(pos) = families.iter().position(|f| f.name == name) {
-        return pos;
+///
+/// Uses a `HashMap` index for O(1) lookup instead of linear search.
+fn get_or_insert(
+    families: &mut Vec<ParsedFamily>,
+    name_to_idx: &mut HashMap<String, usize>,
+    name: &str,
+) -> usize {
+    if let Some(&idx) = name_to_idx.get(name) {
+        return idx;
     }
+    let idx = families.len();
     families.push(ParsedFamily {
         name: name.to_owned(),
         help_line: None,
         type_line: None,
         samples: Vec::new(),
     });
-    families.len() - 1
+    name_to_idx.insert(name.to_owned(), idx);
+    idx
 }
 
 /// Extracts the first whitespace-delimited token from a string.
@@ -321,10 +205,7 @@ mod tests {
         assert!(families[0].help_line.is_some());
         assert!(families[0].type_line.is_some());
         assert_eq!(families[0].samples.len(), 1);
-        assert_eq!(
-            extract_sorted_label_key(&families[0].samples[0].raw_line),
-            ""
-        );
+        assert_eq!(families[0].samples[0].label_key, "");
     }
 
     #[test]
@@ -332,7 +213,7 @@ mod tests {
         let input = "# TYPE req counter\nreq{z=\"1\",a=\"2\",m=\"3\"} 1\n";
         let families = parse_families(input);
         assert_eq!(
-            extract_sorted_label_key(&families[0].samples[0].raw_line),
+            families[0].samples[0].label_key,
             r#"a="2",m="3",z="1""#
         );
     }
@@ -392,164 +273,8 @@ http_req_duration_seconds_count 200
         let input = "req{path=\"/a,b\",method=\"GET\"} 1\n";
         let families = parse_families(input);
         assert_eq!(
-            extract_sorted_label_key(&families[0].samples[0].raw_line),
+            families[0].samples[0].label_key,
             r#"method="GET",path="/a,b""#
         );
-    }
-
-    // ------------------------------------------------------------------
-    // merge_families tests
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn merge_families_no_overlap_is_passthrough() {
-        let input = "# TYPE aaa gauge\naaa 1\n# TYPE bbb gauge\nbbb 2\n";
-        let families = parse_families(input);
-        let (merged, stats) = merge_families(families);
-        assert_eq!(merged.len(), 2);
-        assert_eq!(stats.duplicate_count, 0);
-        assert!(stats.examples.is_empty());
-    }
-
-    #[test]
-    fn merge_families_identical_label_key_first_wins() {
-        // Two sources expose the same label-less metric.
-        let mut families = parse_families("# TYPE up gauge\nup 1\n");
-        families.extend(parse_families("# TYPE up gauge\nup 0\n"));
-        let (merged, stats) = merge_families(families);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].samples.len(), 1, "duplicate must be dropped");
-        // First value (1) must be kept.
-        assert!(merged[0].samples[0].raw_line.contains("up 1"));
-        assert_eq!(stats.duplicate_count, 1);
-        assert_eq!(stats.examples, vec!["up"]);
-    }
-
-    #[test]
-    fn merge_families_distinct_label_sets_both_kept() {
-        // Same family name, different labels — no collision.
-        let mut families = parse_families("cpu{cpu=\"0\"} 100\n");
-        families.extend(parse_families("cpu{cpu=\"1\"} 200\n"));
-        let (merged, stats) = merge_families(families);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].samples.len(), 2);
-        assert_eq!(stats.duplicate_count, 0);
-    }
-
-    #[test]
-    fn merge_families_partial_overlap() {
-        // Source 1: cpu{cpu="0"} and cpu{cpu="1"}
-        // Source 2: cpu{cpu="1"} (duplicate) and cpu{cpu="2"} (new)
-        let mut families = parse_families("cpu{cpu=\"0\"} 10\ncpu{cpu=\"1\"} 20\n");
-        families.extend(parse_families("cpu{cpu=\"1\"} 99\ncpu{cpu=\"2\"} 30\n"));
-        let (merged, stats) = merge_families(families);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].samples.len(), 3, "0, 1 and 2 should be present");
-        assert_eq!(stats.duplicate_count, 1);
-        // The kept value for cpu="1" must be 20 (first-wins), not 99.
-        let kept = merged[0]
-            .samples
-            .iter()
-            .find(|s| extract_sorted_label_key(&s.raw_line) == r#"cpu="1""#)
-            .expect("cpu=1 sample must exist");
-        assert!(
-            kept.raw_line.contains("20"),
-            "first-seen value must be kept"
-        );
-    }
-
-    // ------------------------------------------------------------------
-    // inject_labels tests
-    // ------------------------------------------------------------------
-
-    fn labels(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect()
-    }
-
-    #[test]
-    fn inject_labels_into_metric_without_labels() {
-        let mut families = parse_families("up 1\n");
-        inject_labels(&mut families, &labels(&[("cluster", "prod")]));
-        assert_eq!(families[0].samples[0].raw_line, "up{cluster=\"prod\"} 1\n");
-    }
-
-    #[test]
-    fn inject_labels_into_metric_with_existing_labels() {
-        let mut families = parse_families("req{method=\"GET\"} 42\n");
-        inject_labels(&mut families, &labels(&[("cluster", "prod")]));
-        assert_eq!(
-            families[0].samples[0].raw_line,
-            "req{method=\"GET\",cluster=\"prod\"} 42\n"
-        );
-    }
-
-    #[test]
-    fn inject_labels_preserves_timestamp() {
-        let mut families = parse_families("up 1 1700000000\n");
-        inject_labels(&mut families, &labels(&[("dc", "eu")]));
-        assert_eq!(
-            families[0].samples[0].raw_line,
-            "up{dc=\"eu\"} 1 1700000000\n"
-        );
-    }
-
-    #[test]
-    fn inject_labels_multiple_sorted_alphabetically() {
-        let mut families = parse_families("up 1\n");
-        inject_labels(
-            &mut families,
-            &labels(&[("zone", "a"), ("cluster", "prod")]),
-        );
-        // BTreeMap sorts keys: cluster < zone
-        assert_eq!(
-            families[0].samples[0].raw_line,
-            "up{cluster=\"prod\",zone=\"a\"} 1\n"
-        );
-    }
-
-    #[test]
-    fn inject_labels_escapes_special_chars_in_value() {
-        let mut families = parse_families("up 1\n");
-        inject_labels(&mut families, &labels(&[("label", "val\\with\"quotes")]));
-        assert_eq!(
-            families[0].samples[0].raw_line,
-            "up{label=\"val\\\\with\\\"quotes\"} 1\n"
-        );
-    }
-
-    #[test]
-    fn inject_labels_empty_extra_is_noop() {
-        let input = "up 1\n";
-        let mut families = parse_families(input);
-        inject_labels(&mut families, &HashMap::new());
-        assert_eq!(families[0].samples[0].raw_line, "up 1\n");
-    }
-
-    #[test]
-    fn inject_labels_affects_shard_key() {
-        // With extra labels, extract_sorted_label_key must return a non-empty key.
-        let mut families = parse_families("up 1\n");
-        inject_labels(&mut families, &labels(&[("cluster", "prod")]));
-        let key = extract_sorted_label_key(&families[0].samples[0].raw_line);
-        assert_eq!(key, r#"cluster="prod""#);
-    }
-
-    #[test]
-    fn merge_families_examples_capped_at_three() {
-        // Four duplicate series — examples list must not exceed 3.
-        let mut f1_input = String::new();
-        let mut f2_input = String::new();
-        for i in 0..4 {
-            f1_input.push_str(&format!("m{{id=\"{i}\"}} 1\n"));
-            f2_input.push_str(&format!("m{{id=\"{i}\"}} 2\n"));
-        }
-        let mut families = parse_families(&f1_input);
-        families.extend(parse_families(&f2_input));
-        let (_, stats) = merge_families(families);
-        assert_eq!(stats.duplicate_count, 4);
-        assert_eq!(stats.examples.len(), 3, "examples must be capped at 3");
     }
 }

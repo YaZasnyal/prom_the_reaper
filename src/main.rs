@@ -5,6 +5,7 @@ mod scraper;
 mod self_metrics;
 mod server;
 mod state;
+mod transform;
 #[cfg(test)]
 mod tests;
 
@@ -16,6 +17,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use clap::{Parser, Subcommand};
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -87,16 +89,22 @@ async fn main() -> anyhow::Result<()> {
     let config = Arc::new(config);
     let shared_state = Arc::new(ArcSwap::new(empty_state()));
 
+    let cancel = CancellationToken::new();
+
     tokio::spawn(scraper::run_scrape_loop(
         config.clone(),
         shared_state.clone(),
+        cancel.clone(),
     ));
 
     let app = server::router(shared_state, num_shards);
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     info!(addr = %listen_addr, "listening");
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(cancel))
+        .await?;
 
+    info!("shutdown complete");
     Ok(())
 }
 
@@ -135,3 +143,26 @@ timeout_secs = 5
 # headers = { "Authorization" = "Bearer token123" }
 # extra_labels = { cluster = "prod", datacenter = "eu-west-1" }
 "#;
+
+/// Waits for SIGINT (ctrl+c) or SIGTERM, then cancels the token so the
+/// scrape loop also stops.
+async fn shutdown_signal(cancel: CancellationToken) {
+    let ctrl_c = tokio::signal::ctrl_c();
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => info!("received SIGINT, shutting down"),
+        _ = terminate => info!("received SIGTERM, shutting down"),
+    }
+
+    cancel.cancel();
+}
