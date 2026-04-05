@@ -212,10 +212,7 @@ mod tests {
     fn label_key_is_sorted() {
         let input = "# TYPE req counter\nreq{z=\"1\",a=\"2\",m=\"3\"} 1\n";
         let families = parse_families(input);
-        assert_eq!(
-            families[0].samples[0].label_key,
-            r#"a="2",m="3",z="1""#
-        );
+        assert_eq!(families[0].samples[0].label_key, r#"a="2",m="3",z="1""#);
     }
 
     #[test]

@@ -425,7 +425,11 @@ async fn full_scrape_cycle_with_mock_upstream() {
 
     let shared_state = empty_shared_state();
     let cancel = CancellationToken::new();
-    tokio::spawn(run_scrape_loop(config, shared_state.clone(), cancel.clone()));
+    tokio::spawn(run_scrape_loop(
+        config,
+        shared_state.clone(),
+        cancel.clone(),
+    ));
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {

@@ -12,7 +12,11 @@ use crate::parser::parse_families;
 use crate::state::{ShardedState, SharedState, SourceStatus, build_shards};
 use crate::transform::{inject_labels, merge_families};
 
-pub async fn run_scrape_loop(config: Arc<AppConfig>, state: SharedState, cancel: CancellationToken) {
+pub async fn run_scrape_loop(
+    config: Arc<AppConfig>,
+    state: SharedState,
+    cancel: CancellationToken,
+) {
     let client = Client::builder()
         .user_agent(format!("prom_the_reaper/{}", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))

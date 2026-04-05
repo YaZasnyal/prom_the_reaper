@@ -5,9 +5,9 @@ mod scraper;
 mod self_metrics;
 mod server;
 mod state;
-mod transform;
 #[cfg(test)]
 mod tests;
+mod transform;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
