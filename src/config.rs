@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::Path;
 
 use anyhow::{Context, ensure};
@@ -46,11 +47,26 @@ impl AppConfig {
             self.scrape_interval_secs > 0,
             "scrape_interval_secs must be greater than 0"
         );
+
+        // Validate listen address is a valid socket address (no DNS resolution).
+        ensure!(
+            self.listen.parse::<SocketAddr>().is_ok(),
+            "listen address {:?} is not a valid socket address (expected ip:port, e.g. \"0.0.0.0:9090\")",
+            self.listen
+        );
+
         for (i, source) in self.sources.iter().enumerate() {
             ensure!(
                 !source.url.is_empty(),
                 "source[{}] url must not be empty",
                 i
+            );
+            // Validate URL is parseable.
+            ensure!(
+                url::Url::parse(&source.url).is_ok(),
+                "source[{}] url {:?} is not a valid URL",
+                i,
+                source.url
             );
             ensure!(
                 source.timeout_secs > 0,

@@ -1016,10 +1016,12 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
  "toml",
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
  "xxhash-rust",
 ]
 

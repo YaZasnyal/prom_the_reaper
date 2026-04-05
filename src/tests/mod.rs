@@ -9,7 +9,7 @@ use axum::routing::get;
 use axum_test::TestServer;
 use flate2::read::GzDecoder;
 
-use crate::parser::{extract_sorted_label_key, parse_families};
+use crate::parser::parse_families;
 use crate::server::router;
 use crate::state::{ShardedState, SharedState, SourceStatus, build_shards, empty_state};
 
@@ -394,6 +394,7 @@ async fn full_scrape_cycle_with_mock_upstream() {
     use crate::scraper::run_scrape_loop;
     use std::collections::HashMap;
     use tokio::net::TcpListener;
+    use tokio_util::sync::CancellationToken;
 
     let upstream_listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -423,7 +424,12 @@ async fn full_scrape_cycle_with_mock_upstream() {
     });
 
     let shared_state = empty_shared_state();
-    tokio::spawn(run_scrape_loop(config, shared_state.clone()));
+    let cancel = CancellationToken::new();
+    tokio::spawn(run_scrape_loop(
+        config,
+        shared_state.clone(),
+        cancel.clone(),
+    ));
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {
@@ -472,7 +478,7 @@ async fn consistent_hashing_minimal_movement() {
         .flat_map(|f| {
             f.samples
                 .iter()
-                .map(|s| format!("{}\x00{}", f.name, extract_sorted_label_key(&s.raw_line)))
+                .map(|s| format!("{}\x00{}", f.name, s.label_key))
         })
         .collect();
 
